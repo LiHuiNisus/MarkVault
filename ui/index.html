@@ -1,5 +1,32 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
-<head><meta charset="UTF-8"><title>MarkVault</title></head>
-<body><h1>MarkVault 脚手架就绪</h1></body>
+<head>
+  <meta charset="UTF-8">
+  <title>MarkVault</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="layout">
+    <div id="sidebar">
+      <div id="sidebar-top">
+        <button id="btn-new">新建</button>
+        <input id="search" type="search" placeholder="搜索标题和正文…">
+      </div>
+      <ul id="note-list"></ul>
+      <div id="tag-bar"></div>
+    </div>
+    <div id="main">
+      <div id="editor-pane">
+        <input id="title-input" placeholder="标题">
+        <input id="tags-input" placeholder="标签，逗号分隔">
+        <textarea id="editor" placeholder="Markdown…"></textarea>
+      </div>
+      <div id="preview-pane"><div id="preview"></div></div>
+    </div>
+  </div>
+  <div id="statusbar"><span id="save-status">就绪</span></div>
+  <script src="vendor/marked.min.js"></script>
+  <script src="vendor/purify.min.js"></script>
+  <script src="app.js"></script>
+</body>
 </html>
