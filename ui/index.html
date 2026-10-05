@@ -25,13 +25,19 @@
     </div>
   </div>
   <div id="export-bar">
-    <button data-fmt="html">HTML</button>
-    <button data-fmt="md">Markdown</button>
-    <button data-fmt="doc">Word</button>
-    <button data-fmt="pdf">PDF</button>
-    <button data-fmt="png">PNG</button>
+    <button id="btn-export-toggle">导出 ▾</button>
+    <div id="export-menu" class="hidden">
+      <button data-fmt="html">HTML</button>
+      <button data-fmt="md">Markdown</button>
+      <button data-fmt="doc">Word</button>
+      <button data-fmt="pdf">PDF</button>
+      <button data-fmt="png">PNG</button>
+    </div>
   </div>
-  <div id="statusbar"><span id="save-status">就绪</span></div>
+  <div id="statusbar">
+    <span id="save-status">就绪</span>
+    <button id="btn-vault-dir">更换文件夹</button>
+  </div>
   <script src="vendor/marked.min.js"></script>
   <script src="vendor/purify.min.js"></script>
   <script src="vendor/dom-to-image-more.min.js"></script>

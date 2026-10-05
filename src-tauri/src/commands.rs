@@ -32,6 +32,12 @@ pub fn pick_vault_dir(app: tauri::AppHandle) -> Result<Option<String>, String> {
     Ok(picked.map(|p| p.to_string()))
 }
 
+/// 前端收到 close-requested 并保存完后调用；destroy 绕过 CloseRequested，避免再次触发保存链路。
+#[tauri::command]
+pub fn close_window(window: tauri::Window) {
+    let _ = window.destroy();
+}
+
 fn now_stamp() -> String {
     chrono::Local::now().format("%Y%m%d-%H%M%S").to_string()
 }
