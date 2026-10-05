@@ -113,13 +113,55 @@ async function confirmDiscard() {
 
 function setStatus(t) { document.getElementById('save-status').textContent = t; }
 
+async function exportNote(format) {
+  if (!state.current) { setStatus('没有可导出的笔记'); return; }
+  await doSave();
+  const fileName = state.current.file_name || '无标题';
+  if (format === 'pdf') { window.print(); return; }
+  let payload = '';
+  if (format === 'html' || format === 'doc') {
+    payload = buildStandaloneHtml();
+  } else if (format === 'md') {
+    payload = document.getElementById('editor').value;
+  } else if (format === 'png') {
+    try {
+      payload = await capturePng();
+    } catch (e) {
+      setStatus('生成图片失败：' + e);
+      return;
+    }
+    if (!payload) { setStatus('生成图片失败'); return; }
+  }
+  try {
+    const path = await invoke('export_note', { fileName, format, payload });
+    setStatus('已导出：' + path);
+  } catch (e) {
+    setStatus('导出失败：' + e);
+  }
+}
+
+function buildStandaloneHtml() {
+  const body = document.getElementById('preview').innerHTML;
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${state.current.title}</title><style>body{max-width:800px;margin:40px auto;font-family:sans-serif;line-height:1.7;} pre{background:#f4f4f4;padding:12px;} code{background:#f4f4f4;}</style></head><body>${body}</body></html>`;
+}
+
+async function capturePng() {
+  // dom-to-image-more 渲染预览区为 PNG（需 vendor 引入）
+  const node = document.getElementById('preview');
+  const dataUrl = await domtoimage.toPng(node);
+  if (!dataUrl || dataUrl.indexOf(',') === -1) return null;
+  return dataUrl.split(',')[1];
+}
+
 document.getElementById('editor').addEventListener('input', () => { render(document.getElementById('editor').value); scheduleAutosave(); });
 document.getElementById('title-input').addEventListener('input', scheduleAutosave);
 document.getElementById('tags-input').addEventListener('input', scheduleAutosave);
 document.getElementById('search').addEventListener('input', () => refreshList());
 document.getElementById('btn-new').onclick = newNote;
 
-window.MV = { state, api, render, scheduleAutosave, refreshList, openNote, newNote };
+document.querySelectorAll('#export-bar button').forEach(b => b.onclick = () => exportNote(b.dataset.fmt));
+
+window.MV = { state, api, render, scheduleAutosave, refreshList, openNote, newNote, exportNote };
 
 (async function init() {
   const cfg = await ensureConfig();

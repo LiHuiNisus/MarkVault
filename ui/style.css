@@ -41,3 +41,18 @@ body { display: flex; flex-direction: column; height: 100vh; font-family: "Micro
 #preview ul, #preview ol { margin: 8px 0; padding-left: 28px; }
 #preview li { margin: 4px 0; }
 #statusbar { padding: 4px 12px; font-size: 12px; background: #1a1a1a; color: #888; }
+
+/* 打印/PDF 导出：隐藏界面元素，正文改为白底黑字 */
+@media print {
+  #sidebar, #editor-pane, #export-bar, #statusbar { display: none; }
+  #layout { display: block; overflow: visible; }
+  #preview-pane { overflow: visible; background: #fff; }
+  #preview { color: #000; background: #fff; }
+  #preview a { color: #000; }
+  #preview h1, #preview h2 { border-bottom-color: #ccc; }
+  #preview code, #preview pre { background: #f4f4f4; border-color: #ddd; }
+  #preview blockquote { background: #f9f9f9; border-left-color: #ccc; color: #333; }
+  #preview th, #preview td { border-color: #ccc; }
+  #preview th { background: #f0f0f0; }
+  #preview tr:nth-child(even) { background: #f7f7f7; }
+}

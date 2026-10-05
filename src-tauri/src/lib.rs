@@ -3,6 +3,7 @@ pub mod store;
 
 mod commands;
 mod config;
+mod export;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -16,7 +17,8 @@ pub fn run() {
             commands::list_notes,
             commands::read_note,
             commands::save_note,
-            commands::search_notes
+            commands::search_notes,
+            export::export_note
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
