@@ -1,3 +1,6 @@
+// pub：供 Task 3 的 Tauri command 层调用，同时避免 dead_code 警告
+pub mod store;
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
