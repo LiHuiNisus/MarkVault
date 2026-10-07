@@ -5,39 +5,212 @@
   <title>MarkVault</title>
   <link rel="stylesheet" href="style.css">
 </head>
-<body>
-  <div id="layout">
-    <div id="sidebar">
-      <div id="sidebar-top">
-        <button id="btn-new">新建</button>
-        <input id="search" type="search" placeholder="搜索标题和正文…">
+<body data-theme="light">
+  <div id="app">
+    <header class="header-bar">
+      <div class="header-brand">
+        <span class="brand-logo" aria-hidden="true">M</span>
+        <div class="brand-info">
+          <span class="brand">MarkVault</span>
+          <span class="brand-sep" aria-hidden="true">/</span>
+          <input type="text" id="title-input" class="filename-input" value="" placeholder="未命名文档" title="标题">
+        </div>
       </div>
-      <ul id="note-list"></ul>
-      <div id="tag-bar"></div>
-    </div>
-    <div id="main">
-      <div id="editor-pane">
-        <input id="title-input" placeholder="标题">
-        <input id="tags-input" placeholder="标签，逗号分隔">
-        <textarea id="editor" placeholder="Markdown…"></textarea>
+      <div class="header-actions">
+        <div class="header-status">
+          <svg class="icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>
+          <span id="save-status">就绪</span>
+        </div>
+        <button id="btn-save" class="primary" title="保存 Ctrl+S">保存</button>
+        <button id="btn-sidebar" title="收起/展开笔记列表">
+          <svg class="icon" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/></svg>
+        </button>
+        <button id="btn-open" title="打开本地 Markdown 文档">打开</button>
+        <div class="dropdown" id="export-dropdown">
+          <button id="btn-export-toggle">导出 <span class="chev">▾</span></button>
+          <div class="dropdown-menu" id="export-menu">
+            <div class="dropdown-item" data-fmt="html">导出 HTML (.html)</div>
+            <div class="dropdown-item" data-fmt="md">导出 Markdown (.md)</div>
+            <div class="dropdown-item" data-fmt="doc">导出 Word (.doc)</div>
+            <div class="dropdown-item" data-fmt="pdf">导出 PDF (.pdf)</div>
+            <div class="dropdown-item" data-fmt="png">导出图片 (.png)</div>
+          </div>
+        </div>
+        <button id="btn-vault-dir" title="更换笔记文件夹">文件夹</button>
+        <button id="btn-theme" title="切换主题">
+          <svg class="icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+        </button>
       </div>
-      <div id="preview-pane"><div id="preview"></div></div>
+    </header>
+
+    <div class="workspace">
+      <aside id="sidebar">
+        <div class="sidebar-top">
+          <div class="sidebar-actions">
+            <button id="btn-new" title="新建笔记">＋ 新建</button>
+          </div>
+          <input id="search" type="search" placeholder="搜索标题和正文…">
+          <div class="sidebar-sort">
+            <select id="sort-select" title="排序方式">
+              <option value="modified">按修改时间</option>
+              <option value="created">按创建时间</option>
+              <option value="title">按标题</option>
+            </select>
+          </div>
+        </div>
+        <ul id="note-list"></ul>
+        <div id="tag-bar"></div>
+      </aside>
+
+      <nav class="side-rail" aria-label="快捷操作" hidden>
+        <div class="rail-group"></div>
+        <div class="rail-spacer"></div>
+        <div class="rail-group"></div>
+      </nav>
+
+      <aside class="outline-panel" id="outline-panel" aria-label="文档目录" aria-hidden="true">
+        <div class="outline-panel-header">
+          <div class="outline-panel-heading">
+            <svg class="icon outline-panel-icon" viewBox="0 0 24 24"><path d="M4 6h16M4 12h10M4 18h7"/></svg>
+            <span class="outline-panel-title">文档目录</span>
+          </div>
+          <button type="button" class="outline-panel-close" id="outline-close" title="关闭目录">
+            <svg class="icon" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>
+          </button>
+        </div>
+        <div class="outline-panel-body" id="outline-list"></div>
+      </aside>
+
+      <div class="workspace-main">
+        <div class="content-shell main layout-both" id="main-shell">
+          <div class="content-block editor-block">
+            <div class="title-row">
+              <input id="tags-input" placeholder="标签，逗号分隔">
+              <div class="title-row-actions">
+                <button type="button" id="row-outline" title="目录" aria-pressed="false">
+                  <svg class="icon" viewBox="0 0 24 24"><path d="M4 6h16M4 12h10M4 18h7"/></svg>
+                </button>
+                <div class="dropdown" id="view-dropdown-row">
+                  <button type="button" id="row-view" title="视图">
+                    <svg class="icon" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M12 4v16"/></svg>
+                    <span class="chev">▾</span>
+                  </button>
+                  <div class="dropdown-menu" id="view-menu-row">
+                    <div class="dropdown-item" data-view="both">编辑 + 预览</div>
+                    <div class="dropdown-item" data-view="edit">仅编辑</div>
+                    <div class="dropdown-item" data-view="preview">仅预览</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div class="editor-toolbar">
+              <div class="format-group">
+                <div class="format-group-track">
+                  <button id="btn-undo" title="撤销 Ctrl+Z"><svg class="icon" viewBox="0 0 24 24"><path d="M3 7v6h6"/><path d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6 2.3L3 13"/></svg></button>
+                  <button id="btn-redo" title="重做 Ctrl+Y / Ctrl+Shift+Z"><svg class="icon" viewBox="0 0 24 24"><path d="M21 7v6h-6"/><path d="M3 17a9 9 0 0 1 9-9 9 9 0 0 1 6 2.3L21 13"/></svg></button>
+                  <span class="divider"></span>
+                  <div class="dropdown" id="heading-dropdown">
+                    <button id="btn-heading" title="标题"><svg class="icon" viewBox="0 0 24 24"><path d="M6 4v16M18 4v16M6 12h12"/></svg><span class="chev">▾</span></button>
+                    <div class="dropdown-menu" id="heading-menu">
+                      <div class="dropdown-item" data-h="1">H1 一级标题</div>
+                      <div class="dropdown-item" data-h="2">H2 二级标题</div>
+                      <div class="dropdown-item" data-h="3">H3 三级标题</div>
+                      <div class="dropdown-item" data-h="4">H4 四级标题</div>
+                      <div class="dropdown-item" data-h="5">H5 五级标题</div>
+                      <div class="dropdown-item" data-h="6">H6 六级标题</div>
+                    </div>
+                  </div>
+                  <span class="divider"></span>
+                  <button id="btn-bold" title="加粗 Ctrl+B"><svg class="icon" viewBox="0 0 24 24"><path d="M7 5h6a3.5 3.5 0 0 1 0 7H7zM7 12h7a3.5 3.5 0 0 1 0 7H7z"/></svg></button>
+                  <button id="btn-italic" title="斜体 Ctrl+I"><svg class="icon" viewBox="0 0 24 24"><path d="M19 4h-9M14 20H5M15 4L9 20"/></svg></button>
+                  <button id="btn-underline" title="下划线"><svg class="icon" viewBox="0 0 24 24"><path d="M7 4v7a5 5 0 0 0 10 0V4M5 20h14"/></svg></button>
+                  <button id="btn-strike" title="删除线"><svg class="icon" viewBox="0 0 24 24"><path d="M4 12h16"/><path d="M8 8a4 4 0 1 1 8 0M16 16a4 4 0 1 1-8 0"/></svg></button>
+                  <span class="divider"></span>
+                  <button id="btn-quote" title="引用"><svg class="icon" viewBox="0 0 24 24"><path d="M10 8c-3 0-5 2-5 5v3h5v-5H7.5C7.7 9.6 8.7 9 10 9zM20 8c-3 0-5 2-5 5v3h5v-5h-2.5c.2-1.4 1.2-2 2.5-2z"/></svg><span class="txt">引用</span></button>
+                  <button id="btn-task" title="任务"><svg class="icon" viewBox="0 0 24 24"><rect x="3" y="5" width="6" height="6" rx="1"/><path d="M6.2 6.5l1.2 1.2 2-2.4M13 7h8M13 17h8"/><rect x="3" y="15" width="6" height="6" rx="1"/></svg><span class="txt">任务</span></button>
+                  <button id="btn-ul" title="无序列表"><svg class="icon" viewBox="0 0 24 24"><circle cx="5" cy="7" r="1.3"/><circle cx="5" cy="12" r="1.3"/><circle cx="5" cy="17" r="1.3"/><path d="M10 7h10M10 12h10M10 17h10"/></svg><span class="txt">无序</span></button>
+                  <div class="dropdown" id="ol-dropdown">
+                    <button id="btn-ol" title="有序列表"><svg class="icon" viewBox="0 0 24 24"><path d="M10 7h10M10 12h10M10 17h10"/><path d="M4 5.5L5.5 5v4M3.8 11.2c.4-.5 1.6-.5 1.8.2.2.8-1.8 1.2-1.8 2.6h2.2M4 17.5h1.6c.5 0 .8.3.8.8s-.4.7-.8.7c.5 0 .9.3.9.8s-.4.8-.9.8H4"/></svg><span class="txt">有序</span><span class="chev">▾</span></button>
+                    <div class="dropdown-menu" id="ol-menu">
+                      <div class="dropdown-item" data-ol="default">默认数字</div>
+                      <div class="dropdown-item" data-ol="circle">圆形序号</div>
+                    </div>
+                  </div>
+                  <span class="divider"></span>
+                  <button id="btn-inline-code" title="行内代码"><svg class="icon" viewBox="0 0 24 24"><path d="M9 7l-5 5 5 5M15 7l5 5-5 5"/></svg><span class="txt">行内代码</span></button>
+                  <button id="btn-codeblock" title="代码块"><svg class="icon" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 10l-2.5 2L9 14M15 10l2.5 2L15 14"/></svg></button>
+                  <button id="btn-link" title="链接"><svg class="icon" viewBox="0 0 24 24"><path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.6l-1.5 1.4"/><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.6l1.5-1.4"/></svg><span class="txt">链接</span></button>
+                  <button id="btn-tag" title="标签"><svg class="icon" viewBox="0 0 24 24"><path d="M3 11V4a1 1 0 0 1 1-1h7l10 10-8 8L3 11z"/><circle cx="7.5" cy="7.5" r="1.4"/></svg><span class="txt">标签</span></button>
+                  <button id="btn-hr" title="插入线条"><svg class="icon" viewBox="0 0 24 24"><path d="M4 12h16"/></svg><span class="txt">线条</span></button>
+                </div>
+              </div>
+            </div>
+            <div class="find-bar" id="find-bar" hidden>
+              <input id="find-input" type="text" placeholder="查找（Enter 下一个，Shift+Enter 上一个）">
+              <span id="find-count" class="find-count"></span>
+              <button type="button" id="find-prev" title="上一个">↑</button>
+              <button type="button" id="find-next" title="下一个">↓</button>
+              <button type="button" id="find-close" title="关闭 Esc">✕</button>
+            </div>
+            <div class="pane editor-pane">
+              <div class="editor-body" id="editor-scroll">
+                <div class="editor-grid">
+                  <div class="editor-gutter" id="editor-gutter" aria-hidden="true"></div>
+                  <div class="editor-stack">
+                    <div class="editor-highlight" id="editor-highlight" aria-hidden="true"></div>
+                    <textarea id="editor" placeholder="开始输入 Markdown..." spellcheck="false"></textarea>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="resizer" id="resizer" role="separator" aria-orientation="vertical">
+            <div class="resizer-handle" aria-hidden="true">
+              <svg class="icon" viewBox="0 0 24 24"><path d="M15 6l-6 6 6 6"/></svg>
+              <svg class="icon" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg>
+            </div>
+          </div>
+          <div class="content-block preview-block">
+            <div class="preview-toolbar">
+              <span class="preview-toolbar-title">实时预览</span>
+              <div class="title-row-actions preview-actions">
+                <button type="button" id="prow-outline" title="目录" aria-pressed="false">
+                  <svg class="icon" viewBox="0 0 24 24"><path d="M4 6h16M4 12h10M4 18h7"/></svg>
+                </button>
+                <div class="dropdown" id="view-dropdown-prow">
+                  <button type="button" id="prow-view" title="视图">
+                    <svg class="icon" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M12 4v16"/></svg>
+                    <span class="chev">▾</span>
+                  </button>
+                  <div class="dropdown-menu" id="view-menu-prow">
+                    <div class="dropdown-item" data-view="both">编辑 + 预览</div>
+                    <div class="dropdown-item" data-view="edit">仅编辑</div>
+                    <div class="dropdown-item" data-view="preview">仅预览</div>
+                  </div>
+                </div>
+              </div>
+              <span id="word-count" class="preview-word-count">0 字</span>
+            </div>
+            <div class="pane preview-pane">
+              <div class="preview-content" id="preview"></div>
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
-  <div id="export-bar">
-    <button id="btn-export-toggle">导出 ▾</button>
-    <div id="export-menu" class="hidden">
-      <button data-fmt="html">HTML</button>
-      <button data-fmt="md">Markdown</button>
-      <button data-fmt="doc">Word</button>
-      <button data-fmt="pdf">PDF</button>
-      <button data-fmt="png">PNG</button>
+
+  <div id="link-modal" class="link-modal" hidden>
+    <div class="link-modal-box">
+      <div class="link-modal-title">插入链接</div>
+      <input id="link-url" type="text" placeholder="https://example.com">
+      <div class="link-modal-actions">
+        <button id="link-cancel" class="ghost">取消</button>
+        <button id="link-ok" class="primary">确定</button>
+      </div>
     </div>
   </div>
-  <div id="statusbar">
-    <span id="save-status">就绪</span>
-    <button id="btn-vault-dir">更换文件夹</button>
-  </div>
+
   <script src="vendor/marked.min.js"></script>
   <script src="vendor/purify.min.js"></script>
   <script src="vendor/dom-to-image-more.min.js"></script>

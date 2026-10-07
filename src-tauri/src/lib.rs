@@ -20,6 +20,10 @@ pub fn run() {
             commands::read_note,
             commands::save_note,
             commands::search_notes,
+            commands::delete_note,
+            commands::rename_note,
+            commands::import_note,
+            commands::confirm_dialog,
             commands::close_window,
             export::export_note
         ])
