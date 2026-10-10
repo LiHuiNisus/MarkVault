@@ -26,6 +26,7 @@ serde_json = "1"
 chrono = "0.4"
 base64 = "0.22"
 dirs = "5"
+zip = { version = "9.0.1", default-features = false, features = ["deflate"] }
 
 # 纯净 PDF 导出：直接调 WebView2 PrintToPdfStream（ICoreWebView2_16）
 # 纯净 PDF 导出：直接调 WebView2 PrintToPdfStream（ICoreWebView2_16）

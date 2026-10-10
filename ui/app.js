@@ -660,17 +660,23 @@ async function refreshList() {
   names.delete('');
   const folderNames = [...names].sort((a, b) => a.localeCompare(b, 'zh-Hans-CN'));
   const rootNotes = buckets.get('') || [];
+  // 正在编辑但尚未落盘的新笔记：先建好占位行，空列表/有列表都要显示
+  const draftItem = state.current && !state.current.file_name ? buildDraftItem($('doc-title').value) : null;
   if (!state.notes.length && !folderNames.length) {
-    const li = document.createElement('li');
-    li.className = 'empty';
-    li.textContent = q ? '没有匹配的笔记' : '点击「新建」写第一篇笔记';
-    ul.appendChild(li);
+    if (draftItem) ul.appendChild(draftItem);
+    else {
+      const li = document.createElement('li');
+      li.className = 'empty';
+      li.textContent = q ? '没有匹配的笔记' : '点击「新建」写第一篇笔记';
+      ul.appendChild(li);
+    }
     renderTagBar();
     return;
   }
   // 扁平排列：根标头（有文件夹时才显示）→ 根笔记 → 各文件夹（标头 + 其笔记）
   // 同组内保持 Rust 给的 modified 倒序，不重排。
   const frag = document.createDocumentFragment();
+  if (draftItem) frag.appendChild(draftItem);
   if (folderNames.length) frag.appendChild(buildRootHeader(rootNotes.length));
   for (const n of rootNotes) {
     const el = buildNoteItem(n, q);
@@ -698,6 +704,22 @@ async function refreshList() {
   }
   ul.appendChild(frag);
   renderTagBar();
+}
+
+/* 草稿占位行：点「新建」后立刻可见，不再等 2 秒自动保存才出现条目。 */
+function buildDraftItem(title) {
+  const li = document.createElement('li');
+  li.className = 'draft';
+  const nt = document.createElement('div');
+  nt.className = 'nt';
+  nt.textContent = title || '未命名文档';
+  const nm = document.createElement('div');
+  nm.className = 'nm';
+  nm.textContent = '编辑中…（自动保存后落到列表）';
+  li.appendChild(nt);
+  li.appendChild(nm);
+  li.onclick = e => { e.stopPropagation(); $('doc-title').focus(); };
+  return li;
 }
 
 /* 悬停编辑：列表项内联输入框替换标题，Enter/失焦提交，Esc 取消 */
@@ -745,7 +767,7 @@ function startInlineRename(li, n) {
 async function deleteNoteFlow(n) {
   const ok = await invoke('confirm_dialog', {
     title: '确认删除',
-    message: `确定删除「${n.title}」？将移入笔记库的 .trash 文件夹，可手动恢复。`,
+    message: `确定删除「${n.title}」？将移入系统回收站，可从回收站恢复。`,
     okLabel: '删除',
     cancelLabel: '取消',
   });
@@ -1353,10 +1375,12 @@ async function newNote() {
   render('');
   state.dirty = false;
   document.title = '未命名文档 - MarkVault';
-  // 明确告知新笔记会落到哪，避免用户以为"点了新建却什么都没发生"
+  // 明确告知新笔记会落到哪，避免用户以为"点了新建却什么都没发生"；
+  // 左栏同时插入占位条，让"已创建"立刻可见。
   const where = state.folderFilter !== null
     ? (state.folderFilter || '根目录')
     : (state.activeFolder || '根目录');
+  await refreshList();
   setStatus('新笔记将保存到「' + where + '」，输入即自动保存', 'ok');
   $('doc-title').focus();
 }
@@ -1808,6 +1832,13 @@ function insertTable() {
 /* 插入图片：Tauri WebView2 无原生图片选择，走文件对话框选一个本地图片，
    复制进库内 .assets/ 后插入相对路径引用。 */
 function insertImage() { pickAndSaveImage(true); }
+
+/* 图片约束：与后端 MAX_IMAGE_BYTES 一致，前端先挡住再发，提示文案保持一致 */
+const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+const IMAGE_EXT_HINT = '仅支持JPG、PNG、JPEG格式的图片';
+const IMAGE_SIZE_HINT = '图片大小不能超过10M';
+const ALLOWED_IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/jpg'];
+
 async function pickAndSaveImage(insert) {
   try {
     const picked = await invoke('pick_image');
@@ -1822,12 +1853,25 @@ async function pickAndSaveImage(insert) {
     }
     return rel;
   } catch (err) {
-    setStatus('插入图片失败：' + err, 'error');
+    // 后端的格式/大小提示原样透出，不加前缀
+    const msg = String(err);
+    if (msg.includes('格式') || msg.includes('10M')) setStatus(msg, 'error');
+    else setStatus('插入图片失败：' + msg, 'error');
     return null;
   }
 }
 
-/* 粘贴图片：从剪贴板取 Blob，落进 .assets/ 并插入引用 */
+/* 大图 base64：逐块转字符串再拼，避免一次性 apply 超长参数导致调用栈溢出 */
+function bytesToBase64(bytes) {
+  const CHUNK = 0x8000;
+  let bin = '';
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+  }
+  return btoa(bin);
+}
+
+/* 粘贴图片：从剪贴板取 Blob，校验格式与大小后落进 .assets/ 并插入引用 */
 async function handleImagePaste(e) {
   const items = e.clipboardData && e.clipboardData.items;
   if (!items) return false;
@@ -1836,20 +1880,28 @@ async function handleImagePaste(e) {
       const file = it.getAsFile();
       if (!file) continue;
       e.preventDefault();
-      const buf = await file.arrayBuffer();
-      const bytes = new Uint8Array(buf);
-      let bin = '';
-      for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
-      const ext = (file.type.split('/')[1] || 'png').replace('jpeg', 'jpg');
+      // 格式白名单：只放行 png / jpg(jpeg)
+      if (!ALLOWED_IMAGE_TYPES.includes(file.type.toLowerCase())) {
+        setStatus(IMAGE_EXT_HINT, 'error');
+        return true;
+      }
+      if (file.size > MAX_IMAGE_BYTES) {
+        setStatus(IMAGE_SIZE_HINT, 'error');
+        return true;
+      }
       try {
-        const rel = await invoke('save_asset', { dataBase64: btoa(bin), ext });
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        const ext = file.type.toLowerCase().includes('png') ? 'png' : 'jpg';
+        const rel = await invoke('save_asset', { dataBase64: bytesToBase64(bytes), ext });
         const ta = $('editor');
         const s = ta.selectionStart, e2 = ta.selectionEnd;
         const ins = `![图片](${rel})`;
         applyEdit(s, e2, ins, s + ins.length, s + ins.length);
         setStatus('已粘贴图片到 ' + rel, 'ok');
       } catch (err) {
-        setStatus('粘贴图片失败：' + err, 'error');
+        const msg = String(err);
+        if (msg.includes('格式') || msg.includes('10M')) setStatus(msg, 'error');
+        else setStatus('粘贴图片失败：' + msg, 'error');
       }
       return true;
     }
@@ -1968,8 +2020,10 @@ async function exportNote(format) {
   const fileName = state.current.file_name;
   // PDF 由 Rust 端 WebView2 原生渲染（无页眉页脚），前端不传内容
   let payload = '';
-  if (format === 'html' || format === 'doc') {
+  if (format === 'html') {
     payload = buildStandaloneHtml();
+  } else if (format === 'docx') {
+    payload = buildDocxPayload($('editor').value);
   } else if (format === 'md') {
     payload = $('editor').value;
   } else if (format === 'png') {
@@ -2018,8 +2072,43 @@ function showToast(text, action) {
   toastTimer = setTimeout(() => el.classList.remove('show'), 6000);
 }
 
-function buildStandaloneHtml() {
-  const body = $('preview').innerHTML;
+/* DOCX 载荷：把 Markdown 逐行解析成结构化段落（heading / paragraph / list / code / quote），
+   Rust 端据此生成真正的 OOXML，而不是把 HTML 改个扩展名。 */
+function buildDocxPayload(md) {
+  const out = [];
+  const lines = (md || '').split('\n');
+  let inFence = false, buf = [];
+  const flushCode = () => {
+    if (buf.length) { out.push({ block: 'code', text: buf.join('\n') }); buf = []; }
+  };
+  const headings = parseHeadings(md || '');
+  const headingLines = new Map(headings.map(h => [h.line, h]));
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i];
+    if (/^\s*(```|~~~)/.test(raw)) { inFence = !inFence; if (!inFence) flushCode(); continue; }
+    if (inFence) { buf.push(raw); continue; }
+    const h = headingLines.get(i);
+    if (h) { out.push({ block: 'heading', level: h.level, text: h.text }); continue; }
+    // setext 标题的下划线行（=== / ---）已被并入标题，跳过它本身
+    if (/^\s*(=+|-+)\s*$/.test(raw) && i > 0 && lines[i - 1].trim()) continue;
+    const t = raw.trim();
+    // 空行不入段：每个 block 本身就是独立段落，保留空段落只会让 Word 里多出空行
+    if (!t) continue;
+    let m;
+    if ((m = t.match(/^>\s?(.*)$/))) { out.push({ block: 'quote', text: m[1] }); continue; }
+    if ((m = t.match(/^\s*(?:[-*+]|\d+\.)\s+(.*)$/))) {
+      // 有序列表保留序号，无序统一用项目符号（docx 里由 Rust 端渲染）
+      const ordered = /^\s*\d+\./.test(t);
+      out.push({ block: 'list', text: ordered ? t : m[1] });
+      continue;
+    }
+    out.push({ block: 'paragraph', text: t.replace(/[*_`]/g, '') });
+  }
+  flushCode();
+  return JSON.stringify(out);
+}
+
+function buildStandaloneHtml() {  const body = $('preview').innerHTML;
   const escHtml = s => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${escHtml(state.current.title || '')}</title><style>body{max-width:800px;margin:40px auto;font-family:sans-serif;line-height:1.8;color:#1a1d23;} pre{background:#1a1d27;color:#d7dbea;padding:16px;border-radius:10px;} code{background:rgba(163,21,21,.08);padding:2px 5px;border-radius:4px;} pre code{background:transparent;padding:0;} blockquote{border-left:4px solid #6C5CE7;background:rgba(108,92,231,.07);margin:12px 0;padding:12px 16px;} table{border-collapse:collapse;width:100%;} th,td{border:1px solid #ddd;padding:8px 12px;} th{background:#f3f5f8;} img{max-width:100%;} h1{font-size:2em;} h2{border-bottom:1px solid #eee;padding-bottom:6px;} ul.task-list{list-style:none;padding-left:.4em;} li.task-item{list-style:none;} li.task-item input[type="checkbox"]{appearance:none;-webkit-appearance:none;width:15px;height:15px;border:1.5px solid #9a948c;border-radius:4px;vertical-align:-2px;margin-right:6px;position:relative;} li.task-item input[type="checkbox"]:checked{background:#6C5CE7;border-color:#6C5CE7;} li.task-item input[type="checkbox"]:checked::after{content:'';position:absolute;left:4px;top:1px;width:4px;height:8px;border:solid #fff;border-width:0 2px 2px 0;transform:rotate(45deg);} ol.ol-circle{list-style:none;counter-reset:ol-circle;padding-left:0;} ol.ol-circle>li{counter-increment:ol-circle;position:relative;padding-left:30px;margin:6px 0;} ol.ol-circle>li::before{content:counter(ol-circle);position:absolute;left:0;top:.2em;width:20px;height:20px;border-radius:50%;background:#6C5CE7;color:#fff;font-size:12px;display:inline-flex;align-items:center;justify-content:center;} .badge{display:inline-block;padding:2px 10px;border-radius:999px;font-size:12px;font-weight:600;} .badge.tone-accent{background:rgba(108,92,231,.12);color:#6C5CE7;} .badge.tone-green{background:rgba(46,184,114,.14);color:#1f9d63;} .badge.tone-yellow{background:rgba(240,180,40,.16);color:#b07d10;} .badge.tone-dark{background:rgba(30,34,44,.88);color:#fff;} u{text-decoration:underline;text-underline-offset:3px;}</style></head><body>${body}</body></html>`;
 }
@@ -2067,7 +2156,13 @@ $('editor').addEventListener('scroll', () => {
 function syncTitle(src) {
   const other = src === $('doc-title') ? $('title-input') : $('doc-title');
   if (other.value !== src.value) other.value = src.value;
+  syncDraftTitle();
   scheduleAutosave();
+}
+/* 标题改动也刷新占位行的文字，让列表里显示的就是当前标题 */
+function syncDraftTitle() {
+  const el = document.querySelector('#note-list li.draft .nt');
+  if (el) el.textContent = $('doc-title').value || '未命名文档';
 }
 $('doc-title').addEventListener('input', () => syncTitle($('doc-title')));
 $('title-input').addEventListener('input', () => syncTitle($('title-input')));
@@ -2206,6 +2301,8 @@ document.addEventListener('keydown', e => {
   else if (ctrl && e.shiftKey && e.key.toLowerCase() === 'l') { e.preventDefault(); cycleLayout(); }
   else if (ctrl && e.shiftKey && e.key.toLowerCase() === 't') { e.preventDefault(); applyTheme(document.body.dataset.theme === 'dark' ? 'light' : 'dark'); }
   else if (ctrl && e.key.toLowerCase() === 'f') { e.preventDefault(); openFindBar(); }
+  // Ctrl+H：打开查找栏并聚焦替换输入框
+  else if (ctrl && e.key.toLowerCase() === 'h') { e.preventDefault(); openFindBar(); $('replace-input').focus(); }
   // 查找跳转后会聚焦编辑器（让命中可见），此时 Enter 应继续跳到下一个而非插入换行
   else if (e.key === 'Enter' && !$('find-bar').hidden && e.target === $('editor')) {
     e.preventDefault();
@@ -2286,6 +2383,48 @@ $('find-next').onclick = () => { findIdx++; gotoFindHit(true); };
 $('find-prev').onclick = () => { findIdx--; gotoFindHit(true); };
 $('find-close').onclick = closeFindBar;
 
+/* ---------- 替换 ----------
+   替换走 applyEdit（execCommand insertText），因此仍进原生撤销栈，Ctrl+Z 可回退整批替换。 */
+function replaceCurrent() {
+  const q = $('find-input').value;
+  if (!q || !findHits.length) return;
+  const [s, e] = findHits[findIdx];
+  applyEdit(s, e, $('replace-input').value, s + $('replace-input').value.length, s + $('replace-input').value.length);
+  // 替换后命中位置整体变化，重跑查找并前进到下一处
+  runFind();
+  findIdx++;
+  gotoFindHit(true);
+}
+function replaceAll() {
+  const q = $('find-input').value;
+  const rep = $('replace-input').value;
+  if (!q) return;
+  const v = $('editor').value;
+  const lc = v.toLowerCase(), lq = q.toLowerCase();
+  const out = [];
+  let i = 0, count = 0;
+  while (true) {
+    const at = lc.indexOf(lq, i);
+    if (at === -1) { out.push(v.slice(i)); break; }
+    out.push(v.slice(i, at), rep);
+    i = at + q.length;
+    count++;
+  }
+  if (!count) { setStatus('没有可替换的匹配', 'ok'); return; }
+  const next = out.join('');
+  // 整篇一次替换：选中全部内容再插入，保证能被一次 Ctrl+Z 撤销
+  applyEdit(0, v.length, next, 0, 0);
+  setStatus(`已替换 ${count} 处`, 'ok');
+  runFind();
+}
+$('replace-one').onclick = replaceCurrent;
+$('replace-all').onclick = replaceAll;
+$('replace-input').addEventListener('keydown', e => {
+  e.stopPropagation();
+  if (e.key === 'Enter') { e.preventDefault(); replaceCurrent(); }
+});
+$('replace-input').addEventListener('input', e => e.stopPropagation());
+
 /* ---------- 编辑器 Tab 缩进 ----------
    正文里 Tab 用于缩进，为免纯键盘被困在 textarea：Ctrl+Tab 移出焦点。 */
 $('editor').addEventListener('keydown', e => {
@@ -2356,7 +2495,6 @@ if (state.outlineOpen) {
   $('prow-outline').setAttribute('aria-pressed', 'true');
 }
 
-window.MV = { state, render, renderHighlight, refreshList, openNote, newNote, exportNote, doSave, formatBold, formatItalic, formatUnderline, formatStrike, formatInlineCode, formatQuote, prefixLines, insertHeading, formatOrderedCircleList, insertCodeBlock, insertLink, insertHorizontalRule, insertTag, applyEdit, wrapSel, toggleTaskItem, noteKey, folderOfKey, moveNote, newFolderFlow, newNoteInFolder, renameFolderFlow, deleteFolderFlow };
 
 /* ---------- 启动 ---------- */
 (async function init() {

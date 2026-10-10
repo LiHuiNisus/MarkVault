@@ -152,8 +152,20 @@ pub fn move_note(file_name: String, target_folder: Option<String>) -> Result<Str
     move_one(&dir, &file_name, target_folder.as_deref())
 }
 
+/// 图片上限：10 MB。超过则拒绝，避免把巨图塞进笔记库。
+pub const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
+
+/// 支持的图片扩展名（其他格式一律拒绝，提示用户）。
+pub fn normalize_image_ext(ext: &str) -> Option<&'static str> {
+    match ext.to_lowercase().as_str() {
+        "png" => Some("png"),
+        "jpg" | "jpeg" => Some("jpg"),
+        _ => None,
+    }
+}
+
 /// 选一张本地图片并读成 base64，供前端转存进库内 .assets/。含文件对话框，async 化。
-/// 返回 (base64 数据, 扩展名)，取消时返回 None。
+/// 只接受 png/jpg/jpeg 且不超过 10 MB，其余给出明确提示。
 #[tauri::command(async)]
 pub fn pick_image(
     app: tauri::AppHandle,
@@ -165,18 +177,24 @@ pub fn pick_image(
         .file()
         .set_title("选择图片")
         .set_parent(&window)
-        .add_filter("图片", &["png", "jpg", "jpeg", "gif", "webp", "svg"])
+        .add_filter("图片", &["png", "jpg", "jpeg"])
         .blocking_pick_file();
     let path = match picked {
         Some(p) => p.to_string(),
         None => return Ok(None),
     };
-    let bytes = std::fs::read(&path).map_err(|e| format!("读取图片失败: {e}"))?;
-    let ext = std::path::Path::new(&path)
+    let raw_ext = std::path::Path::new(&path)
         .extension()
         .and_then(|e| e.to_str())
-        .unwrap_or("png")
+        .unwrap_or("")
         .to_lowercase();
+    let ext = normalize_image_ext(&raw_ext)
+        .ok_or("仅支持JPG、PNG、JPEG格式的图片")?
+        .to_string();
+    let bytes = std::fs::read(&path).map_err(|e| format!("读取图片失败: {e}"))?;
+    if bytes.len() > MAX_IMAGE_BYTES {
+        return Err("图片大小不能超过10M".into());
+    }
     Ok(Some(PickedImage {
         data: base64::engine::general_purpose::STANDARD.encode(&bytes),
         ext,
@@ -193,22 +211,24 @@ pub struct PickedImage {
 /// 因此不会作为笔记文件夹出现在侧栏。
 pub const ASSETS_DIR: &str = ".assets";
 
-/// 保存一张图片进库内 .assets/，返回可写进 Markdown 的相对路径（如 ".assets/paste-1.png"）。
-/// 前端粘贴图片、插入截图都走这条；文件名带时间去重前缀，避免覆盖。
+/// 保存一张图片进库内 .assets/，返回可写进 Markdown 的相对路径（如 ".assets/img-1.png"）。
+/// 只接受 png/jpg/jpeg 且不超过 10 MB，其余拒绝；文件名带时间去重前缀，避免覆盖。
 #[tauri::command]
 pub fn save_asset(data_base64: String, ext: String) -> Result<String, String> {
-    use base64::Engine;
     let dir = vault_dir().ok_or("未配置笔记文件夹")?;
-    let ext = match ext.to_lowercase().as_str() {
-        "jpg" | "jpeg" => "jpg",
-        "gif" => "gif",
-        "webp" => "webp",
-        "svg" => "svg",
-        _ => "png",
-    };
+    save_asset_in(&dir, &data_base64, &ext)
+}
+
+/// save_asset 的核心：目录由调用方给定，便于测试。
+pub fn save_asset_in(dir: &std::path::Path, data_base64: &str, ext: &str) -> Result<String, String> {
+    use base64::Engine;
+    let ext = normalize_image_ext(ext).ok_or("仅支持JPG、PNG、JPEG格式的图片")?;
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(data_base64.as_bytes())
         .map_err(|e| format!("图片数据无效: {e}"))?;
+    if bytes.len() > MAX_IMAGE_BYTES {
+        return Err("图片大小不能超过10M".into());
+    }
     let assets = dir.join(ASSETS_DIR);
     std::fs::create_dir_all(&assets).map_err(|e| e.to_string())?;
     let base = format!("img-{}.{}", now_stamp(), ext);
@@ -221,13 +241,19 @@ pub fn save_asset(data_base64: String, ext: String) -> Result<String, String> {
 /// 预览是 innerHTML 注入，file:// 相对路径在 WebView2 里加载不到，故统一转 data URL。
 #[tauri::command]
 pub fn read_asset(rel: String) -> Result<String, String> {
-    use base64::Engine;
     let dir = vault_dir().ok_or("未配置笔记文件夹")?;
+    read_asset_in(&dir, &rel)
+}
+
+/// read_asset 的核心：目录由调用方给定，便于测试。
+/// 读取不做格式白名单——写入端已经卡死了，这里只需保证历史文件的 MIME 正确以便预览显示。
+pub fn read_asset_in(dir: &std::path::Path, rel: &str) -> Result<String, String> {
+    use base64::Engine;
     let parts: Vec<&str> = rel.split('/').collect();
     if parts.len() != 2 || parts[0] != ASSETS_DIR {
         return Err("非法资源路径".into());
     }
-    store::validate_rel_path(&rel)?;
+    store::validate_rel_path(rel)?;
     let path = dir.join(ASSETS_DIR).join(parts[1]);
     if !path.is_file() {
         return Err("资源不存在".into());
@@ -530,4 +556,93 @@ fn move_one(dir: &std::path::Path, file_name: &str, target_folder: Option<&str>)
     }
     store::move_note(dir, file_name, &dst)?;
     Ok(dst)
+}
+
+#[cfg(test)]
+mod asset_tests {
+    use super::*;
+
+    fn tmp(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("mv-asset-{}-{}", tag, std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn b64(bytes: &[u8]) -> String {
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    }
+
+    #[test]
+    fn ext_whitelist_accepts_only_png_jpg_jpeg() {
+        for ok in ["png", "PNG", "jpg", "JPG", "jpeg", "JPEG", "Jpeg"] {
+            assert!(normalize_image_ext(ok).is_some(), "应接受 {ok}");
+        }
+        for bad in ["gif", "webp", "svg", "bmp", "tiff", "", "exe"] {
+            assert!(normalize_image_ext(bad).is_none(), "应拒绝 {bad}");
+        }
+        // jpeg 统一归一化为 jpg
+        assert_eq!(normalize_image_ext("jpeg"), Some("jpg"));
+        assert_eq!(normalize_image_ext("JPEG"), Some("jpg"));
+    }
+
+    #[test]
+    fn size_limit_is_ten_megabytes() {
+        assert_eq!(MAX_IMAGE_BYTES, 10 * 1024 * 1024);
+    }
+
+    #[test]
+    fn save_asset_writes_into_assets_dir() {
+        let dir = tmp("save");
+        let rel = save_asset_in(&dir, &b64(b"PNGDATA"), "png").unwrap();
+        assert!(rel.starts_with(".assets/") && rel.ends_with(".png"), "返回 {rel}");
+        // 文件确实落到磁盘，内容一致
+        let written = std::fs::read(dir.join(&rel)).unwrap();
+        assert_eq!(written, b"PNGDATA");
+        // .assets 不会作为笔记文件夹被列出
+        assert!(!crate::store::list_folders(&dir).contains(&".assets".to_string()));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn save_asset_rejects_bad_ext_and_oversize() {
+        let dir = tmp("reject");
+        assert_eq!(save_asset_in(&dir, &b64(b"x"), "gif").unwrap_err(), "仅支持JPG、PNG、JPEG格式的图片");
+        let big = vec![0u8; MAX_IMAGE_BYTES + 1];
+        assert_eq!(save_asset_in(&dir, &b64(&big), "png").unwrap_err(), "图片大小不能超过10M");
+        // 拒绝时不应落盘
+        assert!(!dir.join(".assets").exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn save_asset_dedups_same_second_names() {
+        let dir = tmp("dedup");
+        let a = save_asset_in(&dir, &b64(b"ONE"), "png").unwrap();
+        let b = save_asset_in(&dir, &b64(b"TWO"), "jpg").unwrap();
+        assert_ne!(a, b);
+        assert_eq!(std::fs::read(dir.join(&a)).unwrap(), b"ONE");
+        assert_eq!(std::fs::read(dir.join(&b)).unwrap(), b"TWO");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn read_asset_roundtrips_as_data_url() {
+        let dir = tmp("read");
+        let rel = save_asset_in(&dir, &b64(b"HELLO"), "png").unwrap();
+        let url = read_asset_in(&dir, &rel).unwrap();
+        assert_eq!(url, format!("data:image/png;base64,{}", b64(b"HELLO")));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn read_asset_rejects_traversal_and_missing() {
+        let dir = tmp("readbad");
+        for bad in [".assets/../config.json", "other/x.png", ".assets/a/b.png", "../../etc/passwd"] {
+            assert!(read_asset_in(&dir, bad).is_err(), "应拒绝 {bad}");
+        }
+        assert!(read_asset_in(&dir, ".assets/nope.png").is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }

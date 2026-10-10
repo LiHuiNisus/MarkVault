@@ -14,7 +14,7 @@ pub fn export_note(
     let ext = match format.as_str() {
         "html" => "html",
         "md" => "md",
-        "doc" => "doc",
+        "docx" => "docx",
         "pdf" => "pdf",
         "png" => "png",
         _ => return Err("不支持的格式".into()),
@@ -47,6 +47,12 @@ pub fn export_note(
         render_pdf(&window, &path)?;
         return Ok(path);
     }
+    // DOCX 由前端传结构化的段落数组，这里打包成 OOXML（真 Word 文件，不是改扩展名的 HTML）
+    if format == "docx" {
+        let doc = docx_from_payload(&payload)?;
+        std::fs::write(&path, doc).map_err(|e| e.to_string())?;
+        return Ok(path);
+    }
     let bytes: Vec<u8> = match format.as_str() {
         "png" => base64::engine::general_purpose::STANDARD
             .decode(&payload)
@@ -55,6 +61,116 @@ pub fn export_note(
     };
     std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
     Ok(path)
+}
+
+/// 前端传的 DOCX 载荷：段落数组，block 取 heading/paragraph/list/code/quote。
+#[derive(serde::Deserialize)]
+struct DocxBlock {
+    #[serde(default)]
+    block: String,
+    #[serde(default)]
+    text: String,
+    #[serde(default)]
+    level: u8,
+}
+
+/// 把段落数组打包成最小可用 OOXML 文档（[Content_Types].xml + rels + document.xml）。
+fn docx_from_payload(payload: &str) -> Result<Vec<u8>, String> {
+    let blocks: Vec<DocxBlock> =
+        serde_json::from_str(payload).map_err(|e| format!("文档内容解析失败: {e}"))?;
+    let body = build_document_xml(&blocks);
+    write_docx_zip(&body)
+}
+
+/// 正文 XML：段落顺序即文档顺序。标题用 pStyle，代码块用等宽字体，引用用斜体缩进。
+fn build_document_xml(blocks: &[DocxBlock]) -> String {
+    let mut s = String::from(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>"#,
+    );
+    for b in blocks {
+        let text = xml_escape(&b.text);
+        match b.block.as_str() {
+            "heading" => {
+                let lvl = b.level.clamp(1, 6);
+                s.push_str(&format!(
+                    r#"<w:p><w:pPr><w:pStyle w:val="Heading{}"/></w:pPr><w:r><w:t xml:space="preserve">{}</w:t></w:r></w:p>"#,
+                    lvl, text
+                ));
+            }
+            "code" => {
+                s.push_str(&format!(
+                    r#"<w:p><w:pPr><w:rPr><w:rFonts w:ascii="Consolas" w:hAnsi="Consolas"/></w:rPr></w:pPr><w:r><w:rPr><w:rFonts w:ascii="Consolas" w:hAnsi="Consolas"/></w:rPr><w:t xml:space="preserve">{}</w:t></w:r></w:p>"#,
+                    text
+                ));
+            }
+            "quote" => {
+                s.push_str(&format!(
+                    r#"<w:p><w:pPr><w:ind w:left="720"/></w:pPr><w:r><w:rPr><w:i/></w:rPr><w:t xml:space="preserve">{}</w:t></w:r></w:p>"#,
+                    text
+                ));
+            }
+            "list" => {
+                s.push_str(&format!(
+                    r#"<w:p><w:pPr><w:ind w:left="360"/></w:pPr><w:r><w:t xml:space="preserve">• {}</w:t></w:r></w:p>"#,
+                    text
+                ));
+            }
+            _ => {
+                s.push_str(&format!(
+                    r#"<w:p><w:r><w:t xml:space="preserve">{}</w:t></w:r></w:p>"#,
+                    text
+                ));
+            }
+        }
+    }
+    // sectPr 必须有，否则 Word 打开报文档损坏
+    s.push_str(
+        r#"<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1134" w:right="1134" w:bottom="1134" w:left="1134"/></w:sectPr></w:body></w:document>"#,
+    );
+    s
+}
+
+fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+/// 写出 docx 压缩包：4 个必需部件 + 一个最小 styles.xml（提供 Heading1-6 样式）。
+fn write_docx_zip(document_xml: &str) -> Result<Vec<u8>, String> {
+    use std::io::Write;
+    use zip::write::SimpleFileOptions;
+
+    let content_types = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/></Types>"#;
+
+    let rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#;
+
+    let doc_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>"#;
+
+    let styles = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:pPr><w:outlineLvl w:val="0"/></w:pPr><w:rPr><w:b/><w:sz w:val="32"/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="Heading2"><w:name w:val="heading 2"/><w:pPr><w:outlineLvl w:val="1"/></w:pPr><w:rPr><w:b/><w:sz w:val="28"/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="Heading3"><w:name w:val="heading 3"/><w:pPr><w:outlineLvl w:val="2"/></w:pPr><w:rPr><w:b/><w:sz w:val="26"/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="Heading4"><w:name w:val="heading 4"/><w:pPr><w:outlineLvl w:val="3"/></w:pPr><w:rPr><w:b/><w:sz w:val="24"/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="Heading5"><w:name w:val="heading 5"/><w:pPr><w:outlineLvl w:val="4"/></w:pPr><w:rPr><w:b/><w:sz w:val="22"/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="Heading6"><w:name w:val="heading 6"/><w:pPr><w:outlineLvl w:val="5"/></w:pPr><w:rPr><w:b/><w:sz w:val="20"/></w:rPr></w:style></w:styles>"#;
+
+    let mut buf = Vec::new();
+    {
+        let mut zw = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+        let opts = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        let mut put = |name: &str, data: &str| -> Result<(), String> {
+            zw.start_file(name, opts).map_err(|e| e.to_string())?;
+            zw.write_all(data.as_bytes()).map_err(|e| e.to_string())
+        };
+        put("[Content_Types].xml", content_types)?;
+        put("_rels/.rels", rels)?;
+        put("word/_rels/document.xml.rels", doc_rels)?;
+        put("word/document.xml", document_xml)?;
+        put("word/styles.xml", styles)?;
+        zw.finish().map_err(|e| e.to_string())?;
+    }
+    Ok(buf)
 }
 
 /// 用笔记标题当导出文件名：替换 Windows 非法字符，去掉首尾空格与点，截断到 80 字符。
@@ -197,4 +313,45 @@ fn read_stream(
 #[cfg(not(windows))]
 fn render_pdf(_window: &tauri::WebviewWindow, _path: &str) -> Result<(), String> {
     Err("仅 Windows 支持原生 PDF 导出".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn docx_payload_builds_valid_zip() {
+        let payload = r#"[{"block":"heading","level":1,"text":"标题"},{"block":"paragraph","text":"正文"},{"block":"code","text":"let x = 1;"},{"block":"list","text":"项目"},{"block":"quote","text":"引用"}]"#;
+        let bytes = docx_from_payload(payload).unwrap();
+        // ZIP 魔数 PK\x03\x04
+        assert_eq!(&bytes[0..4], b"PK\x03\x04");
+        // 必须能读回，且含文档与样式两个部件
+        let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+        let names: Vec<String> = (0..zip.len())
+            .map(|i| zip.by_index(i).unwrap().name().unwrap().to_string())
+            .collect();
+        for need in ["[Content_Types].xml", "word/document.xml", "word/styles.xml", "_rels/.rels"] {
+            assert!(names.iter().any(|n| n == need), "缺少部件 {need}, 实有 {names:?}");
+        }
+        let mut doc = String::new();
+        std::io::Read::read_to_string(&mut zip.by_name("word/document.xml").unwrap(), &mut doc).unwrap();
+        assert!(doc.contains("标题") && doc.contains("Heading1"));
+        assert!(doc.contains("<w:sectPr>"));
+    }
+
+    #[test]
+    fn docx_escapes_xml_specials() {
+        let payload = r#"[{"block":"paragraph","text":"a < b & c > d \"q\""}]"#;
+        let bytes = docx_from_payload(payload).unwrap();
+        let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+        let mut doc = String::new();
+        std::io::Read::read_to_string(&mut zip.by_name("word/document.xml").unwrap(), &mut doc).unwrap();
+        assert!(doc.contains("a &lt; b &amp; c &gt; d &quot;q&quot;"));
+        assert!(!doc.contains("a < b"));
+    }
+
+    #[test]
+    fn docx_rejects_bad_payload() {
+        assert!(docx_from_payload("not json").is_err());
+    }
 }

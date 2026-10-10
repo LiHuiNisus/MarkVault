@@ -211,42 +211,53 @@ pub fn write_note(dir: &Path, file_name: &str, note: &Note) -> Result<(), String
     std::fs::write(&path, raw).map_err(|e| e.to_string())
 }
 
-/// 删除笔记：先进 vault 下的 `.trash/`，让误删可恢复；移入失败再退回直接删除。
+/// 删除笔记：交给系统回收站，用户可以自己到回收站里找回。
+/// 回收站不可用时（如网络盘）退回直接删除，保证删除动作不会卡住。
 pub fn delete_note(dir: &Path, file_name: &str) -> Result<(), String> {
     let path = resolve_note_path(dir, file_name)?;
     if !path.exists() {
         return Err("笔记不存在".into());
     }
-    let trash = dir.join(TRASH_DIR);
-    std::fs::create_dir_all(&trash).map_err(|e| e.to_string())?;
-    let base = path
-        .file_name()
-        .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_else(|| "note.md".into());
-    let dst = trash.join(dedup_path_name(&trash, &base));
-    // 跨卷等 rename 失败场景退回直接删除，保证删除动作不会卡住
-    if std::fs::rename(&path, &dst).is_err() {
-        std::fs::remove_file(&path).map_err(|e| e.to_string())?;
-    }
-    Ok(())
+    move_to_recycle_bin(&path).or_else(|_| std::fs::remove_file(&path).map_err(|e| e.to_string()))
 }
 
-/// 回收站子目录名。以点开头，会被 list_folders 的隐藏项过滤跳过。
-pub const TRASH_DIR: &str = ".trash";
+/// 把文件送进系统回收站（要求用户能从回收站恢复）。
+/// `FOF_ALLOWUNDO` 是「进回收站」而非永久删除的关键标志；加 NOCONFIRMATION/SILENT/NOERRORUI
+/// 让这次操作完全静默——是否需要确认由应用自己的弹窗负责。
+#[cfg(windows)]
+fn move_to_recycle_bin(path: &Path) -> Result<(), String> {
+    use windows::core::PCWSTR;
+    use windows::Win32::UI::Shell::{
+        SHFileOperationW, SHFILEOPSTRUCTW, FOF_ALLOWUNDO, FOF_NOERRORUI, FOF_NOCONFIRMATION,
+        FOF_SILENT, FO_DELETE,
+    };
 
-/// 回收站内重名时追加 -2、-3…，避免覆盖之前删掉的同名笔记。
-fn dedup_path_name(dir: &Path, name: &str) -> String {
-    if !dir.join(name).exists() {
-        return name.to_string();
+    // pFrom 要求双 NUL 结尾的宽字符串（列表以空串收尾）
+    let mut wide: Vec<u16> = path.as_os_str().to_string_lossy().encode_utf16().collect();
+    wide.push(0);
+    wide.push(0);
+
+    let mut op = SHFILEOPSTRUCTW {
+        wFunc: FO_DELETE,
+        pFrom: PCWSTR(wide.as_ptr()),
+        fFlags: (FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI).0 as u16,
+        ..Default::default()
+    };
+    let rc = unsafe { SHFileOperationW(&mut op) };
+    if rc != 0 {
+        return Err(format!("移入回收站失败（错误码 {rc}）"));
     }
-    let stem = name.trim_end_matches(".md");
-    for n in 2..10000 {
-        let candidate = format!("{}-{}.md", stem, n);
-        if !dir.join(&candidate).exists() {
-            return candidate;
-        }
+    if !op.fAnyOperationsAborted.as_bool() {
+        Ok(())
+    } else {
+        Err("移入回收站被中止".into())
     }
-    format!("{}-{}.md", stem, chrono::Utc::now().timestamp_millis())
+}
+
+#[cfg(not(windows))]
+fn move_to_recycle_bin(path: &Path) -> Result<(), String> {
+    let _ = path;
+    Err("仅 Windows 支持回收站".into())
 }
 
 /// 移动/改名笔记：src → dst 均为相对路径（可含一层文件夹）。

@@ -319,6 +319,8 @@ button, input, textarea { font-family: inherit; }
   border: 1px solid var(--border); border-radius: var(--radius-sm);
   background: var(--bg); color: var(--text); outline: none;
 }
+#find-input { flex: 1.4; }
+#replace-input { flex: 1; }
 .find-bar input:focus { border-color: var(--accent); }
 .find-count { font-size: 11px; color: var(--text-muted); white-space: nowrap; min-width: 48px; text-align: center; }
 .find-bar button {
@@ -326,6 +328,8 @@ button, input, textarea { font-family: inherit; }
   border-radius: var(--radius-sm); background: var(--panel-bg); color: var(--text-secondary);
   cursor: pointer; font-size: 12px; line-height: 1;
 }
+/* 替换按钮是文字按钮，比图标按钮宽 */
+.find-bar #replace-one, .find-bar #replace-all { width: auto; padding: 0 9px; white-space: nowrap; }
 .find-bar button:hover { border-color: var(--accent); color: var(--accent); }
 .sidebar-actions { display: flex; gap: 8px; align-items: stretch; }
 .sidebar-actions #btn-new { flex: 1; }
@@ -453,6 +457,14 @@ button, input, textarea { font-family: inherit; }
   margin-left: 10px; padding: 6px 10px;
   color: var(--text-muted); font-size: 11px; font-style: italic;
 }
+
+/* 草稿占位行：新笔记尚未落盘时的列表占位，用虚线边框区别于真实条目 */
+#note-list li.draft {
+  border: 1px dashed var(--border); border-radius: 8px;
+  background: var(--surface); cursor: default;
+}
+#note-list li.draft .nt { color: var(--text-secondary); }
+#note-list li.draft .nm { color: var(--accent); }
 
 /* 多选：选中行与折叠态文件夹标头一致，用浅底 + 左侧色条区分于 active */
 #note-list li.selected { background: var(--accent-soft); }

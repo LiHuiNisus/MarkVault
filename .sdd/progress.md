@@ -1,5 +1,46 @@
 # MarkVault — 开发进度
 
+## 2026-10-11：按用户逐条要求收尾（10 项）
+
+1. **Word 导出写真 DOCX**：新增 `zip = 9`（deflate）依赖，`export.rs` 用 `build_document_xml`
+   + `write_docx_zip` 打包 [Content_Types].xml / _rels/.rels / word/document.xml /
+   word/styles.xml / word/_rels/document.xml.rels。前端 `buildDocxPayload` 把 Markdown 解析成
+   结构化段落（heading/paragraph/list/code/quote）传给后端。菜单项从 `.doc` 改为 `.docx`
+   （「标准 Word 文档，可直接编辑」）。3 条新单测校验 ZIP 魔数、部件齐全、XML 转义、坏载荷拒绝。
+2. 导入前弹框改名：**不做**（用户决定）。
+3. 「新建文件夹」图标按钮：**保留图标**（用户决定）。
+4. **新建即显示占位条目**：`refreshList` 在 `state.current` 无 `file_name` 时插入 `li.draft`
+   （虚线框 +「编辑中…」），标题输入实时同步到占位行文字；保存后由整表重建自然替换为真实条目。
+5. **查找替换**：`#find-bar` 增加「替换为」输入框 + 替换 / 全部替换按钮，Ctrl+H 直达替换框。
+   替换走 `applyEdit`（execCommand insertText），整批替换可一次 Ctrl+Z 撤销。
+6. **删掉死代码**：`window.MV` 调试钩子（438 字符，无任何消费方）已移除。
+7. 深浅两套代码块变量已核对齐全，无需再改。
+8. **删除进系统回收站**：`store::delete_note` 改用 `SHFileOperationW` + `FOF_ALLOWUNDO`
+   （静默、无确认，确认由应用自己的弹窗负责），回收站不可用时退回直接删除。新增
+   `tests/recycle.rs`：用 PowerShell 读回收站条目数，删前删后计数必须增加——若退回永久删除会失败。
+   确认弹窗文案改为「将移入系统回收站，可从回收站恢复」。
+9. 自动保存失败保持顶栏提示（未做横幅，用户认可）。
+10. **图片链路验证 + 格式/大小限制**：仅接受 PNG/JPG/JPEG 且 ≤10MB。
+    - 后端：`commands.rs` 新增 `MAX_IMAGE_BYTES`、`normalize_image_ext`、`save_asset_in`、
+      `read_asset_in`（后两者带目录参数便于测试）；超限/格式错分别返回
+      「图片大小不能超过10M」「仅支持JPG、PNG、JPEG格式的图片」。
+    - 前端：`handleImagePaste` 在调后端前先按 MIME 与 file.size 拦一轮，文案与后端一致；
+      `bytesToBase64` 分块（0x8000）拼接，避免大图 `String.fromCharCode.apply` 爆栈。
+    - 6 条新单测 + 2 个无头脚本（`image-base64-test.js` 校验分块编码与 Buffer 逐字节一致；
+      `image-flow-test.js` + `_image-sandbox.js` 覆盖 GIF/BMP 拒绝、超限拒绝、边界值放行、
+      JPEG→jpg 归一化、后端错误原样透出、纯文本粘贴不拦截）。
+
+### 浏览器端到端验证（真实 ui/ + mock Tauri 桥）
+
+`tmp-tests/harness/`：把 `ui/` 拷进去，前置一个 `mock-tauri.js` 内存实现（含 serde 风格的
+**返回值克隆**，避免前端 state 别名到 mock 内部对象），起 `python -m http.server` 后用
+Chrome DevTools 驱动真实 `app.js`。已验证：首次引导、预览空态、占位条目、自动保存后替换为真实行、
+顶栏路径与字数、查找计数 1/3、全部替换 3 处、标签结构化筛选（正文含该词不被带出）、
+图片粘贴三种拒绝 + 成功插入 + 预览 data URL、`docx` 载荷逐块正确、导出 toast、
+右键移动到文件夹后**顶栏路径与 last_open 同步更新且继续编辑正常保存**（P0 回归）。
+
+测试合计：26 单测 + 20 文件夹集成 + 1 回收站集成 = 47，另有 7 个无头脚本。
+
 ## 2026-10-10：6 角色用户模拟评测 → P0/P1 修复（用户要求「P0 + P1 全部」，一档一编译）
 
 评测报告见 `.sdd/ux-review-2026-10-10.md`（6 个 subagent 分别扮演新手/键盘流/整理型/长文/导出/容错，逐条 file:line 证据）。

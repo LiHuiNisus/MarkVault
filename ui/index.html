@@ -33,7 +33,7 @@
           <div class="dropdown-menu" id="export-menu">
             <div class="dropdown-item" data-fmt="html">HTML <span class="df-hint">保留样式，可再编辑</span></div>
             <div class="dropdown-item" data-fmt="md">Markdown <span class="df-hint">纯文本源文件</span></div>
-            <div class="dropdown-item" data-fmt="doc">Word (.doc) <span class="df-hint">HTML 兼容，Word 可能提示格式</span></div>
+            <div class="dropdown-item" data-fmt="docx">Word (.docx) <span class="df-hint">标准 Word 文档，可直接编辑</span></div>
             <div class="dropdown-item" data-fmt="pdf">PDF <span class="df-hint">版式固定，适合发送打印</span></div>
             <div class="dropdown-item" data-fmt="png">图片 (.png) <span class="df-hint">截当前预览，超长会截断</span></div>
           </div>
@@ -158,9 +158,12 @@
             </div>
             <div class="find-bar" id="find-bar" hidden>
               <input id="find-input" type="text" placeholder="查找（Enter 下一个，Shift+Enter 上一个）">
+              <input id="replace-input" type="text" placeholder="替换为">
               <span id="find-count" class="find-count"></span>
               <button type="button" id="find-prev" title="上一个">↑</button>
               <button type="button" id="find-next" title="下一个">↓</button>
+              <button type="button" id="replace-one" title="替换当前命中">替换</button>
+              <button type="button" id="replace-all" title="替换全部">全部替换</button>
               <button type="button" id="find-close" title="关闭 Esc">✕</button>
             </div>
             <div class="pane editor-pane">

@@ -246,41 +246,30 @@ fn folder_ops_reject_non_directory_targets() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/* ---------- 删除进回收站：可恢复，且不像普通目录那样被列出 ---------- */
+/* ---------- 删除笔记 ---------- */
 
 #[test]
-fn delete_moves_note_into_trash_not_erase() {
-    let dir = tmp_dir("trash");
+fn delete_removes_file() {
+    let dir = tmp_dir("delnote");
     put(&dir, "a.md", "A");
     delete_note(&dir, "a.md").unwrap();
-    // 原位置已空
     assert!(!dir.join("a.md").exists());
-    // 内容进了 .trash，可手动恢复
-    assert_eq!(read_note(dir.join(".trash").as_path(), "a.md").unwrap().content, "A");
-    // .trash 是隐藏目录，不出现在文件夹列表与笔记列表里
-    assert!(!list_folders(&dir).contains(&".trash".to_string()));
     assert!(list_notes(&dir).is_empty());
     std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]
-fn delete_same_name_twice_keeps_both_in_trash() {
-    let dir = tmp_dir("trashdedup");
-    put(&dir, "a.md", "FIRST");
-    delete_note(&dir, "a.md").unwrap();
-    put(&dir, "a.md", "SECOND");
-    delete_note(&dir, "a.md").unwrap();
-    let trash = dir.join(".trash");
-    assert_eq!(read_note(&trash, "a.md").unwrap().content, "FIRST");
-    assert_eq!(read_note(&trash, "a-2.md").unwrap().content, "SECOND");
+fn delete_missing_note_errors() {
+    let dir = tmp_dir("delmissing");
+    assert!(delete_note(&dir, "nope.md").is_err());
     std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]
-fn delete_missing_note_errors_without_creating_trash() {
-    let dir = tmp_dir("trashmissing");
-    assert!(delete_note(&dir, "nope.md").is_err());
-    assert!(!dir.join(".trash").exists());
+fn delete_refuses_path_traversal() {
+    let dir = tmp_dir("deltraversal");
+    assert!(delete_note(&dir, "../escape.md").is_err());
+    assert!(delete_note(&dir, "a/b/c.md").is_err());
     std::fs::remove_dir_all(&dir).ok();
 }
 
