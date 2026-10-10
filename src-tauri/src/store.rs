@@ -3,8 +3,12 @@ use std::path::Path;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NoteMeta {
+    /// 相对路径：根目录为裸文件名，文件夹内为 "文件夹/文件名"。前端直接当唯一键用。
     #[serde(default)]
     pub file_name: String,
+    /// 所属文件夹名，根目录为空串。不入 frontmatter（磁盘位置才是事实来源）。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub folder: String,
     #[serde(default)]
     pub title: String,
     #[serde(default)]
@@ -29,6 +33,7 @@ pub fn parse_frontmatter(raw: &str) -> (NoteMeta, String) {
     let mut lines = raw.lines();
     let fallback = NoteMeta {
         file_name: String::new(),
+        folder: String::new(),
         title: String::new(),
         tags: vec![],
         created: String::new(),
@@ -61,25 +66,25 @@ pub fn serialize_note(meta: &NoteMeta, content: &str) -> String {
     format!("---\n{}\n---\n{}", json, content)
 }
 
-pub fn list_notes(dir: &Path) -> Vec<NoteMeta> {
-    let mut metas = Vec::new();
+/// 扫描单侧目录中的 .md，rel_prefix 为 None（根）或 Some("文件夹名")。
+fn collect_notes(dir: &Path, rel_prefix: Option<&str>, metas: &mut Vec<NoteMeta>) {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
-        Err(_) => return metas,
+        Err(_) => return,
     };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some("md") {
             continue;
         }
-        let file_name = path.file_name().unwrap().to_string_lossy().to_string();
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
         let raw = match std::fs::read_to_string(&path) {
             Ok(r) => r,
             Err(_) => continue,
         };
         let (mut meta, _) = parse_frontmatter(&raw);
         if meta.title.is_empty() {
-            meta.title = file_name.trim_end_matches(".md").to_string();
+            meta.title = name.trim_end_matches(".md").to_string();
         }
         if meta.created.is_empty() {
             // created 为空时回退到文件系统创建时间
@@ -94,54 +99,226 @@ pub fn list_notes(dir: &Path) -> Vec<NoteMeta> {
                 })
                 .unwrap_or_default();
         }
-        meta.file_name = file_name;
+        // file_name 存相对路径：根目录是裸文件名，文件夹内是 "文件夹/文件名"；folder 单独存一份便于前端分组
+        meta.folder = rel_prefix.unwrap_or("").to_string();
+        meta.file_name = match rel_prefix {
+            Some(p) => format!("{}/{}", p, name),
+            None => name,
+        };
         metas.push(meta);
+    }
+}
+
+/// 列出笔记：根目录 + 一层子文件夹。只认一层，文件夹内不再递归。
+pub fn list_notes(dir: &Path) -> Vec<NoteMeta> {
+    let mut metas = Vec::new();
+    collect_notes(dir, None, &mut metas);
+    for folder in list_folders(dir) {
+        collect_notes(&dir.join(&folder), Some(&folder), &mut metas);
     }
     metas.sort_by(|a, b| b.modified.cmp(&a.modified));
     metas
 }
 
-/// 文件名校验：拒绝路径穿越、盘符/ADS 冒号、Windows 非法字符（guard 供所有读写删共用）。
-fn validate_file_name(name: &str) -> Result<(), String> {
+/// 列出 vault 下的一层文件夹名（跳过隐藏项），按名称排序。
+pub fn list_folders(dir: &Path) -> Vec<String> {
+    let mut names = Vec::new();
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return names,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        if name.starts_with('.') {
+            continue;
+        }
+        names.push(name);
+    }
+    names.sort();
+    names
+}
+
+/// 单个路径段校验：拒绝路径穿越、盘符/ADS 冒号、Windows 非法字符。
+fn validate_segment(name: &str) -> Result<(), String> {
     if name.is_empty()
+        || name == "."
         || name.contains("..")
         || name.contains('/')
         || name.contains('\\')
         || name.contains(':')
         || name.chars().any(|c| matches!(c, '<' | '>' | '"' | '|' | '?' | '*'))
     {
-        return Err("非法文件名".into());
+        return Err("非法名称".into());
     }
     Ok(())
 }
 
+/// 笔记相对路径校验：允许「文件名」或「文件夹名/文件名」两种形态，至多一层文件夹。
+/// 每段单独跑 validate_segment，所以 `../x`、`a/../../b`、`C:x` 这类仍被拦下。
+pub fn validate_rel_path(rel: &str) -> Result<(), String> {
+    let parts: Vec<&str> = rel.split('/').collect();
+    if parts.is_empty() || parts.len() > 2 {
+        return Err("非法路径：只支持一层文件夹".into());
+    }
+    for p in parts {
+        validate_segment(p)?;
+    }
+    Ok(())
+}
+
+/// 校验文件名后拼出笔记绝对路径；不检查文件是否存在。
+/// rel 允许一层文件夹（"folder/note.md"），逐段校验防穿越。
+pub fn resolve_note_path(dir: &Path, rel: &str) -> Result<std::path::PathBuf, String> {
+    validate_rel_path(rel)?;
+    let mut path = dir.to_path_buf();
+    for seg in rel.split('/') {
+        path.push(seg);
+    }
+    Ok(path)
+}
+
 pub fn read_note(dir: &Path, file_name: &str) -> Result<Note, String> {
-    validate_file_name(file_name)?;
-    let raw = std::fs::read_to_string(dir.join(file_name)).map_err(|e| e.to_string())?;
+    let path = resolve_note_path(dir, file_name)?;
+    let raw = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
     let (mut meta, content) = parse_frontmatter(&raw);
     if meta.title.is_empty() {
-        meta.title = file_name.trim_end_matches(".md").to_string();
+        // 无 frontmatter 时用文件名兜底；文件夹路径需剥掉前缀
+        let base = file_name.rsplit('/').next().unwrap_or(file_name);
+        meta.title = base.trim_end_matches(".md").to_string();
     }
+    // 磁盘位置才是事实来源：frontmatter 里的 folder 一律忽略
+    meta.folder = match file_name.rsplit_once('/') {
+        Some((f, _)) => f.to_string(),
+        None => String::new(),
+    };
     meta.file_name = file_name.to_string();
     Ok(Note { meta, content })
 }
 
 pub fn write_note(dir: &Path, file_name: &str, note: &Note) -> Result<(), String> {
-    validate_file_name(file_name)?;
-    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let path = resolve_note_path(dir, file_name)?;
+    // 目标可能在文件夹内，先建出文件夹（根目录时 parent 就是 dir，无害）
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
     let mut meta = note.meta.clone();
     meta.modified = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
     let raw = serialize_note(&meta, &note.content);
-    std::fs::write(dir.join(file_name), raw).map_err(|e| e.to_string())
+    std::fs::write(&path, raw).map_err(|e| e.to_string())
 }
 
+/// 删除笔记：先进 vault 下的 `.trash/`，让误删可恢复；移入失败再退回直接删除。
 pub fn delete_note(dir: &Path, file_name: &str) -> Result<(), String> {
-    validate_file_name(file_name)?;
-    std::fs::remove_file(dir.join(file_name)).map_err(|e| e.to_string())
+    let path = resolve_note_path(dir, file_name)?;
+    if !path.exists() {
+        return Err("笔记不存在".into());
+    }
+    let trash = dir.join(TRASH_DIR);
+    std::fs::create_dir_all(&trash).map_err(|e| e.to_string())?;
+    let base = path
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "note.md".into());
+    let dst = trash.join(dedup_path_name(&trash, &base));
+    // 跨卷等 rename 失败场景退回直接删除，保证删除动作不会卡住
+    if std::fs::rename(&path, &dst).is_err() {
+        std::fs::remove_file(&path).map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
-pub fn rename_note(dir: &Path, file_name: &str, new_title: &str) -> Result<NoteMeta, String> {
+/// 回收站子目录名。以点开头，会被 list_folders 的隐藏项过滤跳过。
+pub const TRASH_DIR: &str = ".trash";
+
+/// 回收站内重名时追加 -2、-3…，避免覆盖之前删掉的同名笔记。
+fn dedup_path_name(dir: &Path, name: &str) -> String {
+    if !dir.join(name).exists() {
+        return name.to_string();
+    }
+    let stem = name.trim_end_matches(".md");
+    for n in 2..10000 {
+        let candidate = format!("{}-{}.md", stem, n);
+        if !dir.join(&candidate).exists() {
+            return candidate;
+        }
+    }
+    format!("{}-{}.md", stem, chrono::Utc::now().timestamp_millis())
+}
+
+/// 移动/改名笔记：src → dst 均为相对路径（可含一层文件夹）。
+/// 目标已存在时抛错，交由命令层决策（不静默覆盖）。跨盘符 rename 失败退回复制+删除。
+pub fn move_note(dir: &Path, src: &str, dst: &str) -> Result<(), String> {
+    let from = resolve_note_path(dir, src)?;
+    let to = resolve_note_path(dir, dst)?;
+    if !from.exists() {
+        return Err("原始笔记不存在".into());
+    }
+    if to.exists() {
+        return Err("目标位置已存在同名笔记".into());
+    }
+    if let Some(parent) = to.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    if std::fs::rename(&from, &to).is_err() {
+        std::fs::copy(&from, &to).map_err(|e| e.to_string())?;
+        std::fs::remove_file(&from).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// 新建文件夹：目录已存在则直接成功（幂等），便于重复点击。
+pub fn create_folder(dir: &Path, name: &str) -> Result<(), String> {
+    validate_segment(name)?;
+    std::fs::create_dir_all(dir.join(name)).map_err(|e| e.to_string())
+}
+
+/// 重命名文件夹，并把其中笔记 frontmatter 之外的引用保持不变（文件随目录整体迁移）。
+pub fn rename_folder(dir: &Path, old_name: &str, new_name: &str) -> Result<(), String> {
+    validate_segment(old_name)?;
+    validate_segment(new_name)?;
+    let from = dir.join(old_name);
+    let to = dir.join(new_name);
+    if !from.is_dir() {
+        return Err("文件夹不存在".into());
+    }
+    if to.exists() && to != from {
+        return Err("同名文件夹已存在".into());
+    }
+    std::fs::rename(&from, &to).map_err(|e| e.to_string())
+}
+
+/// 删除文件夹：仅允许空文件夹，避免连带删掉笔记。
+/// 非空时返回明确的错误提示，由用户先移出内容。
+pub fn delete_folder(dir: &Path, name: &str) -> Result<(), String> {
+    validate_segment(name)?;
+    let path = dir.join(name);
+    if !path.is_dir() {
+        return Err("文件夹不存在".into());
+    }
+    let count = std::fs::read_dir(&path).map_err(|e| e.to_string())?.count();
+    if count > 0 {
+        return Err("文件夹非空，请先移出其中的笔记".into());
+    }
+    std::fs::remove_dir(path).map_err(|e| e.to_string())
+}
+
+/// 只改标签、不动 modified 的落盘（批量改标签时不该把全部笔记顶到"最近修改"）。
+pub fn set_tags(dir: &Path, file_name: &str, tags: Vec<String>) -> Result<(), String> {
     let mut note = read_note(dir, file_name)?;
+    let modified = note.meta.modified.clone();
+    note.meta.tags = tags;
+    let mut meta = note.meta;
+    meta.modified = modified;
+    let raw = serialize_note(&meta, &note.content);
+    let path = resolve_note_path(dir, file_name)?;
+    std::fs::write(&path, raw).map_err(|e| e.to_string())
+}
+
+pub fn rename_note(dir: &Path, file_name: &str, new_title: &str) -> Result<NoteMeta, String> {    let mut note = read_note(dir, file_name)?;
     let modified = note.meta.modified.clone();
     note.meta.title = new_title.to_string();
     // 直接落盘，跳过 write_note（它会刷新 modified）；仅标题变化不改"最近修改"排序位置
@@ -191,6 +368,7 @@ mod tests {
     fn test_serialize_roundtrip() {
         let meta = NoteMeta {
             file_name: "20261005-100000-测试.md".into(),
+            folder: String::new(),
             title: "测试笔记".into(),
             tags: vec!["a".into()],
             created: "2026-10-05T10:00:00".into(),
@@ -216,7 +394,7 @@ mod tests {
     fn test_write_note_updates_modified() {
         let dir = tmp_dir();
         let meta = NoteMeta {
-            file_name: "n.md".into(), title: "N".into(), tags: vec![],
+            file_name: "n.md".into(), folder: String::new(), title: "N".into(), tags: vec![],
             created: "2026-01-01T00:00:00".into(), modified: "2026-01-01T00:00:00".into(),
         };
         write_note(&dir, "n.md", &Note { meta, content: "c".into() }).unwrap();
@@ -239,13 +417,19 @@ mod crlf_tests {
     }
 
     #[test]
-    fn test_validate_file_name() {
-        assert!(validate_file_name("a.md").is_ok());
-        assert!(validate_file_name("").is_err());
-        assert!(validate_file_name("../x.md").is_err());
-        assert!(validate_file_name("C:notes.md").is_err());
-        assert!(validate_file_name("a.md:ads").is_err());
-        assert!(validate_file_name("a<b>.md").is_err());
+    fn test_validate_rel_path() {
+        assert!(validate_rel_path("a.md").is_ok());
+        assert!(validate_rel_path("工作/a.md").is_ok());
+        assert!(validate_rel_path("").is_err());
+        assert!(validate_rel_path("../x.md").is_err());
+        assert!(validate_rel_path("C:notes.md").is_err());
+        assert!(validate_rel_path("a.md:ads").is_err());
+        assert!(validate_rel_path("a<b>.md").is_err());
+        // 只允许一层文件夹，且每段都要过校验
+        assert!(validate_rel_path("a/b/c.md").is_err());
+        assert!(validate_rel_path("a//b.md").is_err());
+        assert!(validate_rel_path("a/../../b.md").is_err());
+        assert!(validate_rel_path("sub/").is_err());
     }
 }
 
@@ -260,6 +444,7 @@ mod rename_tests {
         std::fs::create_dir_all(&dir).unwrap();
         let meta = NoteMeta {
             file_name: "r.md".into(),
+            folder: String::new(),
             title: "旧".into(),
             tags: vec![],
             created: "2026-01-01T00:00:00".into(),

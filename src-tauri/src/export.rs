@@ -9,6 +9,7 @@ pub fn export_note(
     file_name: String,
     format: String,
     payload: String,
+    title: Option<String>,
 ) -> Result<String, String> {
     let ext = match format.as_str() {
         "html" => "html",
@@ -18,7 +19,20 @@ pub fn export_note(
         "png" => "png",
         _ => return Err("不支持的格式".into()),
     };
-    let default_name = format!("{}.{}", file_name.trim_end_matches(".md"), ext);
+    // 默认文件名优先用笔记标题（用户认得的名字），清洗 Windows 非法字符后截断；
+    // 标题为空时退回内部文件名末段（避免把路径分隔符带进文件名）。
+    let safe_title = title.as_deref().map(sanitize_filename).filter(|s| !s.is_empty());
+    let default_name = match safe_title {
+        Some(t) => format!("{}.{}", t, ext),
+        None => {
+            let base = file_name
+                .rsplit(['/', '\\'])
+                .next()
+                .unwrap_or(file_name.as_str())
+                .trim_end_matches(".md");
+            format!("{}.{}", base, ext)
+        }
+    };
     let target = app
         .dialog()
         .file()
@@ -41,6 +55,16 @@ pub fn export_note(
     };
     std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
     Ok(path)
+}
+
+/// 用笔记标题当导出文件名：替换 Windows 非法字符，去掉首尾空格与点，截断到 80 字符。
+fn sanitize_filename(title: &str) -> String {
+    let cleaned: String = title
+        .chars()
+        .map(|c| if matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') { '-' } else { c })
+        .collect();
+    let trimmed = cleaned.trim().trim_matches('.').trim();
+    trimmed.chars().take(80).collect::<String>()
 }
 
 /// WebView2 原生 PDF：A4 纵向、无页眉页脚、1.0 缩放、约 1cm 边距。

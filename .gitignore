@@ -1,3 +1,8 @@
 src-tauri/target/
 src-tauri/gen/schemas/
 *.log
+# 构建产物：打包用的可执行文件与卸载器，不入库
+/app.exe
+/uninstall.exe
+# 一次性调试脚本
+/tmp-tests/
