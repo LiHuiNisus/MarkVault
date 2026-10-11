@@ -88,7 +88,8 @@ fn migrate_notes(src: &Path, dst: &Path) -> Result<(), String> {
 }
 
 /// 启动初始化：保证存在可写的笔记目录与配置文件。
-/// 已有配置且未初始化过 → 把旧目录的 .md 迁到默认目录并改写配置；原目录保留。
+/// 首次启动在 exe 同级创建 notes 目录当作笔记库（原目录的 .md 一并迁入，原目录保留）。
+/// exe 同级不可写时（如装到 Program Files）退回用户配置目录，避免启动直接失败。
 pub fn init_config() -> Result<AppConfig, String> {
     let default_dir = default_vault_dir();
     let mut cfg = load_config().unwrap_or(AppConfig {
@@ -103,7 +104,16 @@ pub fn init_config() -> Result<AppConfig, String> {
         cfg.initialized = true;
         save_config(&cfg)?;
     }
-    std::fs::create_dir_all(Path::new(&cfg.vault_dir)).map_err(|e| e.to_string())?;
+    if std::fs::create_dir_all(Path::new(&cfg.vault_dir)).is_err() {
+        // 默认位置建不出来（权限/只读盘）：换到用户配置目录，保证应用能启动
+        let fallback = dirs::config_dir()
+            .ok_or("无法确定笔记目录")?
+            .join("MarkVault")
+            .join(NOTES_DIR_NAME);
+        std::fs::create_dir_all(&fallback).map_err(|e| e.to_string())?;
+        cfg.vault_dir = fallback.to_string_lossy().to_string();
+        save_config(&cfg)?;
+    }
     Ok(cfg)
 }
 

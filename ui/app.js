@@ -20,14 +20,11 @@ const LS = {
 };
 
 /* ---------- 配置 ---------- */
+/* 笔记库目录由后端在启动时创建（exe 同级的 notes），前端只读取。 */
 async function ensureConfig() {
   if (state.config) return state.config;
-  let cfg = await invoke('get_config');
-  if (!cfg) {
-    const dir = await invoke('pick_vault_dir');
-    if (!dir) return null;
-    cfg = await invoke('set_config', { dir });
-  }
+  const cfg = await invoke('get_config');
+  if (!cfg || !cfg.vault_dir) throw new Error('笔记目录初始化失败');
   state.config = cfg;
   return cfg;
 }
@@ -2470,8 +2467,13 @@ if (state.outlineOpen) {
 
 /* ---------- 启动 ---------- */
 (async function init() {
-  const cfg = await ensureConfig();
-  if (!cfg) { setStatus('未选择文件夹，部分功能不可用'); return; }
+  let cfg;
+  try {
+    cfg = await ensureConfig();
+  } catch (e) {
+    setStatus('笔记目录初始化失败：' + e, 'error');
+    return;
+  }
   await refreshList();
   // 打开上次编辑的笔记（仍在列表中才打开）
   const last = LS.get('last_open', '');

@@ -1,5 +1,25 @@
 # MarkVault — 开发进度
 
+## 2026-10-11：首次启动自动建库，去掉选目录弹窗
+
+用户要求：首次启动就在安装路径下建好笔记库目录，不弹选目录框。
+
+- 后端 `config.rs`：
+  - `init_config` 保持「首次运行在 exe 同级建 `notes`，把旧目录的 .md 迁入」，并新增回退——
+    `create_dir_all` 失败（装到 Program Files 等不可写位置）时改用
+    `%APPDATA%\MarkVault\notes`，保证应用总能启动。
+  - 原有 `default_vault_dir` 取 `current_exe().parent()/notes` 已符合需求（dev 是
+    `target/debug/notes`，安装后是安装目录下的 `notes`），未改。
+- 前端 `app.js`：`ensureConfig` 不再调 `pick_vault_dir`，只读配置；缺失或 `vault_dir` 为空时
+  抛出，`init()` 捕获后顶栏报 `笔记目录初始化失败：<原因>`。
+- `import_note` 的错误文案去掉「请先在顶栏设置文件夹」（该按钮已删）。
+- 后端命令 `pick_vault_dir` / `set_config` 保留为未使用入口（仅剩一行 dead_code 警告，不影响构建）。
+
+验证（一次性）：把 config.json 备份后删除，复制 app.exe 到空目录 `D:\mv-fresh` 启动。
+启动后自动生成 `D:\mv-fresh\notes`，config.json 内容
+`{"vault_dir":"D:\\mv-fresh\\notes","initialized":true}`。验证完把原 config 与笔记还原，
+临时目录删除。（`vault_dir` 为空时 `migrate_notes` 直接返回，旧笔记留在原处。）
+
 ## 2026-10-11：移除顶栏「笔记库位置」按钮
 
 用户判断该入口无必要，去掉。

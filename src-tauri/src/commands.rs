@@ -489,7 +489,7 @@ pub fn import_note(
     window: tauri::Window,
     folder: Option<String>,
 ) -> Result<Vec<NoteMeta>, String> {
-    let dir = vault_dir().ok_or("未配置笔记文件夹，请先在顶栏设置文件夹")?;
+    let dir = vault_dir().ok_or("未配置笔记文件夹")?;
     // 导入目标：folder 为空/缺省则落到库根目录
     let target = folder.as_deref().filter(|f| !f.is_empty()).map(|f| f.to_string());
     let dest_dir = match &target {
