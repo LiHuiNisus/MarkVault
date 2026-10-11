@@ -171,6 +171,9 @@ button, input, textarea { font-family: inherit; }
 #save-status.error { color: #f87171; font-weight: 600; }
 #save-status.ok { color: #4ade80; }
 .header-bar button[aria-pressed="true"] { background: var(--header-btn-hover); color: #fff; }
+/* 收起/展开保持与「打开」同款底色：aria-pressed 只用于无障碍状态，不改外观 */
+.header-bar #btn-sidebar[aria-pressed="true"] { background: var(--header-btn-bg); color: var(--accent); }
+.header-bar #btn-sidebar[aria-pressed="true"]:hover { background: var(--header-btn-hover); color: #fff; }
 .header-status .icon { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 2; opacity: 0.75; }
 .header-actions { display: flex; align-items: center; gap: 10px; flex-shrink: 0; margin-left: auto; }
 .header-bar button {
