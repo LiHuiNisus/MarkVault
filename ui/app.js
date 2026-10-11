@@ -397,8 +397,12 @@ function selectRangeTo(key) {
 async function moveSelected(toFolder) {
   const keys = [...state.selected];
   if (!keys.length) return;
+  // 同 moveNote：保存失败即中止批量移动，避免未落盘内容丢失
   for (const k of keys) {
-    if (state.current && noteKey(state.current) === k && state.dirty) await doSave();
+    if (state.current && noteKey(state.current) === k && state.dirty && !(await doSave())) {
+      setStatus('保存失败，已取消移动。请检查笔记文件夹后重试。', 'error');
+      return;
+    }
   }
   try {
     const pairs = await invoke('move_notes', { fileNames: keys, targetFolder: toFolder || '' });
@@ -855,6 +859,10 @@ $('note-list').addEventListener('contextmenu', e => {
     ctxTarget = null;
     noteGroup.hidden = true;
     folderGroup.hidden = false;
+    // 根目录没有文件夹名，重命名/删除对它无意义（后端也会以"非法名称"拒绝）
+    const isRoot = folderHeader.classList.contains('root-header');
+    folderGroup.querySelector('[data-act="rename-folder"]').hidden = isRoot;
+    folderGroup.querySelector('[data-act="delete-folder"]').hidden = isRoot;
   } else {
     return;
   }
@@ -990,8 +998,12 @@ document.querySelectorAll('#ctx-menu > .ctx-group > .dropdown-item').forEach(el 
 });
 
 async function moveNote(key, toFolder) {
-  // 先落盘：否则移动后自动保存仍会按旧路径写回，看起来像复制/复活
-  if (state.current && noteKey(state.current) === key && state.dirty) await doSave();
+  // 先落盘：否则移动后自动保存仍会按旧路径写回，看起来像复制/复活。
+  // 保存失败必须中止移动，否则内存里的未保存内容会随着移动一起丢失。
+  if (state.current && noteKey(state.current) === key && state.dirty && !(await doSave())) {
+    setStatus('保存失败，已取消移动。请检查笔记文件夹后重试。', 'error');
+    return;
+  }
   try {
     const newKey = await invoke('move_note', { fileName: key, targetFolder: toFolder || '' });
     if (state.current && noteKey(state.current) === key) {
@@ -1068,7 +1080,9 @@ async function renameFolderFlow(oldName) {
     // 把已改名的旧文件夹重新建出来（笔记分裂成新旧两份）。
     if (state.current && folderOfKey(state.current.file_name) === oldName) {
       state.current.file_name = name + '/' + baseNameOfKey(state.current.file_name);
+      state.current.folder = name;
       LS.set('last_open', state.current.file_name);
+      updateHeaderPath(state.current);
     }
     collapsedFolders.delete(oldName);
     saveCollapsed();
@@ -1101,10 +1115,13 @@ async function deleteFolderFlow(name) {
     if (!ok) return;
     for (const n of members) {
       try {
-        const meta = await invoke('move_note', { fileName: noteKey(n), targetFolder: '' });
+        // move_note 返回的是新相对路径字符串（不是 NoteMeta），只改路径字段，其余元数据保持
+        const newKey = await invoke('move_note', { fileName: noteKey(n), targetFolder: '' });
         if (state.current && noteKey(state.current) === noteKey(n)) {
-          state.current = meta;
-          LS.set('last_open', noteKey(meta));
+          state.current.file_name = newKey;
+          state.current.folder = folderOfKey(newKey);
+          LS.set('last_open', newKey);
+          updateHeaderPath(state.current);
         }
       } catch (e) {
         setStatus('移出失败：' + e, 'error');
@@ -1259,7 +1276,11 @@ function renderPreviewEmptyState(show) {
 /* ---------- 打开/新建 ---------- */
 async function openNote(fileName) {
   if (state.current && state.current.file_name === fileName && !state.dirty) return;
-  if (state.dirty) await doSave();
+  // 保存失败必须中止切换：state.dirty 是内存里唯一副本，覆盖 state.current 等于丢弃它
+  if (state.dirty && !(await doSave())) {
+    setStatus('保存失败，已取消打开。请检查笔记文件夹后重试。', 'error');
+    return;
+  }
   let note;
   try {
     note = await invoke('read_note', { fileName });
@@ -1284,7 +1305,11 @@ async function openNote(fileName) {
 }
 
 async function newNote() {
-  if (state.dirty) await doSave();
+  // 同 openNote：保存失败不得清空编辑区，否则未落盘内容直接丢失
+  if (state.dirty && !(await doSave())) {
+    setStatus('保存失败，已取消新建。请检查笔记文件夹后重试。', 'error');
+    return;
+  }
   state.current = { file_name: '' };
   $('title-input').value = '';
   $('doc-title').value = '';
@@ -2336,16 +2361,17 @@ $('editor').addEventListener('keydown', e => {
   const ta = $('editor');
   const s = ta.selectionStart, en = ta.selectionEnd, v = ta.value;
   if (e.shiftKey) {
-    // Shift+Tab：对选区内每行（或当前行）删除行首一个缩进单位
+    // Shift+Tab：对选区内每行（或当前行）删除行首最多一个缩进单位（2 空格或 1 个 Tab）
     const lineStart = v.lastIndexOf('\n', s - 1) + 1;
     let lineEnd = v.indexOf('\n', en);
     if (lineEnd === -1) lineEnd = v.length;
     const lines = v.slice(lineStart, lineEnd).split('\n');
     let removedFirst = 0, delta = 0;
     const out = lines.map((l, i) => {
-      const m = l.match(/^[ \t]/);
+      // 一个缩进单位：优先吃掉 2 个空格，否则 1 个 Tab/空格
+      const m = l.match(/^(?:  |\t| )/);
       if (!m) return l;
-      const cut = i === 0 ? m[0].length : 1; // 首行可能从行中间开始，只按实际前缀算
+      const cut = m[0].length;
       if (i === 0) removedFirst = cut;
       delta += cut;
       return l.slice(cut);

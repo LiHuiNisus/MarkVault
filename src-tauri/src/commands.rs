@@ -290,6 +290,9 @@ pub fn search_notes(
         None => return vec![],
     };
     let q = query.trim().to_lowercase();
+    // 空格分隔多个关键词（与前端高亮的分词一致）：每个词都必须在标题/标签/正文里出现（AND）。
+    // 单个词时与整串子串匹配完全相同。
+    let terms = split_terms(&q);
     let tag_filter: Vec<String> = tags
         .unwrap_or_default()
         .into_iter()
@@ -312,19 +315,35 @@ pub fn search_notes(
                     return false;
                 }
             }
-            if q.is_empty() {
+            if terms.is_empty() {
                 return true;
             }
-            // 标题、标签、正文任一模糊命中即算匹配
-            m.title.to_lowercase().contains(&q)
-                || m.tags.iter().any(|t| t.to_lowercase().contains(&q))
-                || store::read_note(&dir, &m.file_name)
-                    .map(|n| n.content.to_lowercase().contains(&q))
-                    .unwrap_or(false)
+            // 正文只读一次，供所有关键词复用
+            let content = store::read_note(&dir, &m.file_name)
+                .map(|n| n.content.to_lowercase())
+                .unwrap_or_default();
+            note_matches(m, &content, &terms)
         })
         .collect();
     sort_metas(&mut metas, sort.as_deref());
     metas
+}
+
+/// 按空白拆分查询串为关键词（已小写）。空串得到空向量。
+fn split_terms(q: &str) -> Vec<String> {
+    q.split_whitespace().map(|t| t.to_string()).collect()
+}
+
+/// 关键词匹配：每个词都要命中标题、标签或正文之一（AND）；空关键词表视为全部命中。
+fn note_matches(meta: &NoteMeta, content_lc: &str, terms: &[String]) -> bool {
+    if terms.is_empty() {
+        return true;
+    }
+    let title = meta.title.to_lowercase();
+    let tags: Vec<String> = meta.tags.iter().map(|t| t.to_lowercase()).collect();
+    terms.iter().all(|term| {
+        title.contains(term) || tags.iter().any(|t| t.contains(term)) || content_lc.contains(term)
+    })
 }
 
 /// 按 sort 取全量笔记列表（不带搜索），供前端无搜索时展示。
@@ -593,5 +612,57 @@ mod asset_tests {
         }
         assert!(read_asset_in(&dir, ".assets/nope.png").is_err());
         std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+#[cfg(test)]
+mod search_tests {
+    use super::*;
+
+    fn meta(title: &str, tags: &[&str]) -> NoteMeta {
+        NoteMeta {
+            file_name: format!("{}.md", title),
+            folder: String::new(),
+            title: title.to_string(),
+            tags: tags.iter().map(|t| t.to_string()).collect(),
+            created: String::new(),
+            modified: String::new(),
+        }
+    }
+
+    #[test]
+    fn single_term_matches_title_tag_or_content() {
+        let terms = split_terms("工作");
+        assert!(note_matches(&meta("会议纪要", &["工作"]), "", &terms)); // 标签命中
+        assert!(note_matches(&meta("工作总结", &[]), "", &terms));      // 标题命中
+        assert!(note_matches(&meta("随笔", &[]), "今天工作很忙", &terms)); // 正文命中
+        assert!(!note_matches(&meta("随笔", &[]), "今天很闲", &terms));
+    }
+
+    #[test]
+    fn multiple_terms_require_all_present() {
+        let terms = split_terms("会议 纪要");
+        // 标题里同时含两个词
+        assert!(note_matches(&meta("会议纪要", &[]), "", &terms));
+        // 一个词在标题、一个词在正文：仍算命中
+        assert!(note_matches(&meta("会议安排", &[]), "这是纪要草稿", &terms));
+        // 只含一个词：不命中
+        assert!(!note_matches(&meta("会议安排", &[]), "没有那个词", &terms));
+    }
+
+    #[test]
+    fn empty_query_matches_everything() {
+        assert!(split_terms("").is_empty());
+        assert!(note_matches(&meta("任意", &[]), "", &[]));
+        // 多余空白不产生空关键词
+        assert_eq!(split_terms("  a   b "), vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn matching_is_case_insensitive() {
+        let terms = split_terms("hello");
+        // note_matches 约定：title/tags 内部自会小写，content 由调用方预先小写
+        assert!(note_matches(&meta("HELLO world", &[]), "", &terms));
+        assert!(note_matches(&meta("x", &[]), "say hello there", &terms));
     }
 }
