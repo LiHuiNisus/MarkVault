@@ -1,6 +1,6 @@
 [package]
 name = "app"
-version = "0.1.0"
+version = "0.1.1"
 description = "MarkVault"
 authors = ["MarkVault"]
 license = ""
@@ -28,7 +28,6 @@ base64 = "0.22"
 dirs = "5"
 zip = { version = "9.0.1", default-features = false, features = ["deflate"] }
 
-# 纯净 PDF 导出：直接调 WebView2 PrintToPdfStream（ICoreWebView2_16）
 # 纯净 PDF 导出：直接调 WebView2 PrintToPdfStream（ICoreWebView2_16）
 # 剪贴板：CF_HDROP / CF_UNICODETEXT 写入需要 DataExchange + Memory + UI_Shell
 [target.'cfg(windows)'.dependencies]

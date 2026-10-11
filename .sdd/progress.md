@@ -1,5 +1,15 @@
 # MarkVault — 开发进度
 
+## 2026-10-11：版本号 bump 0.1.1 + release 打包
+
+- `src-tauri/Cargo.toml`、`src-tauri/tauri.conf.json` 版本 0.1.0 → 0.1.1。
+- `cargo tauri build` 通过：release profile 编译 + NSIS 打包。
+  产物 `src-tauri/target/release/bundle/nsis/MarkVault_0.1.1_x64-setup.exe`（2.4 MiB），
+  release `app.exe` FileVersion / ProductVersion 均为 0.1.1。
+- 顺带删掉 `Cargo.toml` 里重复的 PDF 导出注释行。
+- 提示（未处理）：bundle identifier `net.markvault.app` 以 `.app` 结尾，macOS 上会与
+  bundle 扩展名冲突；仅影响 macOS，Windows 构建无碍。
+
 ## 2026-10-11：按用户逐条要求收尾（10 项）
 
 1. **Word 导出写真 DOCX**：新增 `zip = 9`（deflate）依赖，`export.rs` 用 `build_document_xml`
