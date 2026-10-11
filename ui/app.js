@@ -18,14 +18,6 @@ const LS = {
   set(k, v) { try { localStorage.setItem('mv_' + k, v); } catch { } },
 };
 
-/* 搜索范围下拉的提示文案，随选项切换 */
-const SEARCH_PLACEHOLDER = {
-  all: '搜索标题和正文…',
-  title: '搜索标题…',
-  content: '搜索正文…',
-  tag: '模糊搜索标签名…',
-};
-
 /* ---------- 配置 ---------- */
 /* 笔记库目录由后端在启动时创建（exe 同级的 notes），前端只读取。 */
 async function ensureConfig() {
@@ -472,7 +464,6 @@ function buildNoteItem(n, q) {
       s.textContent = t;
       s.onclick = e => {
         e.stopPropagation();
-        $('search-mode').value = 'tag';
         $('search').value = t;
         refreshList();
       };
@@ -641,9 +632,8 @@ function bindDropTarget(el, folder) {
 async function refreshList() {
   const q = $('search').value.trim();
   const sort = LS.get('sort', 'modified');
-  const mode = $('search-mode').value;
-  // 搜索范围由下拉决定；文件夹筛选与搜索叠加，后端统一过滤
-  const args = { query: q, sort, mode };
+  // 一次搜索覆盖标题、正文与标签；文件夹筛选与搜索叠加，后端统一过滤
+  const args = { query: q, sort };
   if (state.folderFilter !== null) args.folder = state.folderFilter;
   try {
     state.notes = await invoke('search_notes', args);
@@ -2104,11 +2094,6 @@ $('tags-input').addEventListener('input', scheduleAutosave);
 $('search').addEventListener('input', () => {
   clearTimeout(searchTimer);
   searchTimer = setTimeout(refreshList, 250);
-});
-/* 搜索范围下拉：切换后同步 placeholder 并立即重查 */
-$('search-mode').addEventListener('change', () => {
-  $('search').placeholder = SEARCH_PLACEHOLDER[$('search-mode').value] || '搜索…';
-  refreshList();
 });
 
 $('btn-new').onclick = newNote;

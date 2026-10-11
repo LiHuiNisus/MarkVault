@@ -276,23 +276,20 @@ pub fn list_notes(sort: Option<String>) -> Vec<NoteMeta> {
     list_notes_sorted(vault_dir(), sort.as_deref())
 }
 
-/// 搜索：query 按 mode 决定搜索范围——all=标题+标签+正文（默认）、title=仅标题、
-/// content=仅正文、tag=仅标签名（模糊）。tags 与 folder 是结构化筛选（AND 组合，与 query 叠加）。
-/// tags 只比对 frontmatter 的标签，避免把"正文里恰好出现该词"的笔记带出来。
+/// 搜索：query 一次覆盖标题、标签与正文（模糊）。tags 与 folder 是结构化筛选
+/// （AND 组合，与 query 叠加）。tags 只比对 frontmatter 的标签，避免把"正文里恰好出现该词"的笔记带出来。
 #[tauri::command]
 pub fn search_notes(
     query: String,
     sort: Option<String>,
     tags: Option<Vec<String>>,
     folder: Option<String>,
-    mode: Option<String>,
 ) -> Vec<NoteMeta> {
     let dir = match vault_dir() {
         Some(d) => d,
         None => return vec![],
     };
     let q = query.trim().to_lowercase();
-    let mode = mode.unwrap_or_else(|| "all".into());
     let tag_filter: Vec<String> = tags
         .unwrap_or_default()
         .into_iter()
@@ -318,19 +315,12 @@ pub fn search_notes(
             if q.is_empty() {
                 return true;
             }
-            let in_title = || m.title.to_lowercase().contains(&q);
-            let in_tag = || m.tags.iter().any(|t| t.to_lowercase().contains(&q));
-            let in_content = || {
-                store::read_note(&dir, &m.file_name)
+            // 标题、标签、正文任一模糊命中即算匹配
+            m.title.to_lowercase().contains(&q)
+                || m.tags.iter().any(|t| t.to_lowercase().contains(&q))
+                || store::read_note(&dir, &m.file_name)
                     .map(|n| n.content.to_lowercase().contains(&q))
                     .unwrap_or(false)
-            };
-            match mode.as_str() {
-                "title" => in_title(),
-                "content" => in_content(),
-                "tag" => in_tag(),
-                _ => in_title() || in_tag() || in_content(),
-            }
         })
         .collect();
     sort_metas(&mut metas, sort.as_deref());
