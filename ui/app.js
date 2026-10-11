@@ -2246,35 +2246,7 @@ $('btn-hr').onclick = insertHorizontalRule;
 $('btn-undo').onclick = () => { $('editor').focus(); document.execCommand('undo'); };
 $('btn-redo').onclick = () => { $('editor').focus(); document.execCommand('redo'); };
 
-/* ---------- 更换文件夹 ---------- */
-/* 切换前必须先落盘：reload 会销毁页面，防抖窗口内的编辑只存在于内存。 */
-$('btn-vault-dir').onclick = async () => {
-  try {
-    if (state.dirty) {
-      const ok = await doSave();
-      if (!ok) {
-        setStatus('当前笔记未保存成功，已取消切换文件夹', 'error');
-        return;
-      }
-    }
-    const dir = await invoke('pick_vault_dir');
-    if (dir) {
-      // 说明清楚：切换不会搬运旧笔记，避免用户以为笔记丢了
-      const ok = await invoke('confirm_dialog', {
-        title: '切换笔记库',
-        message: `即将把笔记库切换到：\n${dir}\n\n原文件夹里的笔记不会自动搬过来，也不会被删除。继续？`,
-        okLabel: '切换',
-        cancelLabel: '取消',
-      });
-      if (!ok) return;
-      await invoke('set_config', { dir });
-      location.reload();
-    }
-  } catch (e) {
-    setStatus('切换笔记库失败：' + e, 'error');
-  }
-};
-
+/* ---------- 启动 ---------- */
 /* ---------- 关闭窗口 ---------- */
 /* 保存失败必须中止关闭：state.dirty 是内存里唯一副本，销毁页面等于丢弃它。 */
 listen('close-requested', async () => {

@@ -1,5 +1,14 @@
 # MarkVault — 开发进度
 
+## 2026-10-11：移除顶栏「笔记库位置」按钮
+
+用户判断该入口无必要，去掉。
+
+- 删除 `index.html` 的 `#btn-vault-dir` 按钮与其 `onclick` 处理（含切换前的落盘/确认框/reload 整套逻辑）。
+- 保留首次运行引导：`ensureConfig` 仍会在 `get_config` 为空时调 `pick_vault_dir` + `set_config`，
+  所以后端命令 `pick_vault_dir` / `set_config` 不动。
+- 首次运行选目录的一次性入口仍在，只是不再提供中途换库按钮。
+
 ## 2026-10-11：版本号 bump 0.1.1 + release 打包
 
 - `src-tauri/Cargo.toml`、`src-tauri/tauri.conf.json` 版本 0.1.0 → 0.1.1。
