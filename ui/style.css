@@ -360,6 +360,15 @@ button, input, textarea { font-family: inherit; }
   background: var(--surface); color: var(--text); font-size: 12px; outline: none;
 }
 #search:focus { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); background: var(--panel-bg); }
+/* 搜索行：范围下拉 + 输入框并排，下拉固定宽度不随窗口拉伸 */
+.search-row { display: flex; gap: 6px; }
+.search-row #search-mode {
+  flex: 0 0 auto; padding: 7px 6px; font-size: 12px;
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--surface); color: var(--text); outline: none; cursor: pointer;
+}
+.search-row #search-mode:focus { border-color: var(--accent); }
+.search-row #search { flex: 1; min-width: 0; }
 #note-list { flex: 1; overflow-y: auto; list-style: none; padding: 4px 6px; }
 /* 键盘导航：列表本身可聚焦但不画默认轮廓，焦点态落到具体行上 */
 #note-list:focus { outline: none; }
@@ -484,8 +493,6 @@ button, input, textarea { font-family: inherit; }
 }
 .filter-chip:hover { border-color: var(--accent); }
 .filter-chip.is-sel { background: var(--surface); color: var(--text-secondary); }
-#tag-bar .tag.is-active { background: var(--accent); color: #fff; border-color: transparent; }
-#tag-bar .tag.tag-clear { color: var(--danger); }
 
 /* 拖拽落点 */
 #note-list .folder-header.drop-target { background: var(--accent-soft); color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
@@ -514,13 +521,6 @@ button, input, textarea { font-family: inherit; }
 .submenu.show { display: flex; }
 .submenu .dropdown-item { font-size: 12px; }
 .submenu .dropdown-item.is-current { color: var(--accent); font-weight: 600; }
-#tag-bar { padding: 8px 10px; font-size: 11px; border-top: 1px solid var(--border); max-height: 96px; overflow-y: auto; }
-#tag-bar .tag {
-  display: inline-block; margin: 2px 3px; padding: 2px 9px;
-  background: var(--surface); border: 1px solid var(--border); border-radius: 999px;
-  cursor: pointer; color: var(--text-secondary); font-size: 11px;
-}
-#tag-bar .tag:hover { background: var(--accent-soft); color: var(--accent); border-color: transparent; }
 
 /* ===== 左侧图标栏 ===== */
 .side-rail[hidden] { display: none; }

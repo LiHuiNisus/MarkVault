@@ -7,16 +7,23 @@ const state = {
   notes: [], current: null, dirty: false, config: null,
   layout: 'both', outlineOpen: false, sidebarOpen: true,
   folders: [], activeFolder: '',
-  // 结构化筛选：tags 走 frontmatter 精确匹配，folderFilter 为 null 表示不限、'' 表示只看根目录
-  tagFilter: [], folderFilter: null,
+  // 结构化筛选：folderFilter 为 null 表示不限、'' 表示只看根目录
+  folderFilter: null,
   // 多选集合：存 file_name。用于批量移动。
   selected: new Set(),
-  allTags: [],
 };
 
 const LS = {
   get(k, d) { try { const v = localStorage.getItem('mv_' + k); return v === null ? d : v; } catch { return d; } },
   set(k, v) { try { localStorage.setItem('mv_' + k, v); } catch { } },
+};
+
+/* 搜索范围下拉的提示文案，随选项切换 */
+const SEARCH_PLACEHOLDER = {
+  all: '搜索标题和正文…',
+  title: '搜索标题…',
+  content: '搜索正文…',
+  tag: '模糊搜索标签名…',
 };
 
 /* ---------- 配置 ---------- */
@@ -463,7 +470,12 @@ function buildNoteItem(n, q) {
       const s = document.createElement('span');
       s.className = 'lt-tag';
       s.textContent = t;
-      s.onclick = e => { e.stopPropagation(); $('search').value = t; refreshList(); };
+      s.onclick = e => {
+        e.stopPropagation();
+        $('search-mode').value = 'tag';
+        $('search').value = t;
+        refreshList();
+      };
       lt.appendChild(s);
     }
     li.appendChild(lt);
@@ -629,9 +641,9 @@ function bindDropTarget(el, folder) {
 async function refreshList() {
   const q = $('search').value.trim();
   const sort = LS.get('sort', 'modified');
-  // 结构化筛选与搜索叠加，后端统一过滤（标签只比 frontmatter，不搜正文）
-  const args = { query: q, sort };
-  if (state.tagFilter.length) args.tags = state.tagFilter;
+  const mode = $('search-mode').value;
+  // 搜索范围由下拉决定；文件夹筛选与搜索叠加，后端统一过滤
+  const args = { query: q, sort, mode };
   if (state.folderFilter !== null) args.folder = state.folderFilter;
   try {
     state.notes = await invoke('search_notes', args);
@@ -639,7 +651,6 @@ async function refreshList() {
     state.notes = await invoke('list_notes', { sort });
   }
   try { state.folders = await invoke('list_folders'); } catch { state.folders = []; }
-  try { state.allTags = await invoke('list_tags'); } catch { state.allTags = []; }
   // 多选状态与新列表求交，避免残留已不存在的选中项
   const alive = new Set(state.notes.map(n => noteKey(n)));
   [...state.selected].forEach(k => { if (!alive.has(k)) state.selected.delete(k); });
@@ -667,7 +678,6 @@ async function refreshList() {
       li.textContent = q ? '没有匹配的笔记' : '点击「新建」写第一篇笔记';
       ul.appendChild(li);
     }
-    renderTagBar();
     return;
   }
   // 扁平排列：根标头（有文件夹时才显示）→ 根笔记 → 各文件夹（标头 + 其笔记）
@@ -700,7 +710,6 @@ async function refreshList() {
     }
   }
   ul.appendChild(frag);
-  renderTagBar();
 }
 
 /* 草稿占位行：点「新建」后立刻可见，不再等 2 秒自动保存才出现条目。 */
@@ -1173,12 +1182,11 @@ function promptInline(title, initial) {
   });
 }
 
-/* 结构化筛选条：显示当前生效的标签/文件夹筛选与多选计数，可逐个清除 */
+/* 结构化筛选条：显示当前生效的文件夹筛选与多选计数，可逐个清除 */
 function renderFilterBar() {
   const bar = $('filter-bar');
   bar.textContent = '';
   const chips = [];
-  state.tagFilter.forEach(t => chips.push({ label: '标签: ' + t, kind: 'tag', value: t }));
   if (state.folderFilter !== null) {
     chips.push({ label: '文件夹: ' + (state.folderFilter || '根目录'), kind: 'folder', value: state.folderFilter });
   }
@@ -1197,87 +1205,13 @@ function renderFilterBar() {
     } else {
       chip.title = '点击清除该筛选';
       chip.onclick = () => {
-        if (c.kind === 'tag') state.tagFilter = state.tagFilter.filter(x => x !== c.value);
-        else state.folderFilter = null;
+        state.folderFilter = null;
         refreshList();
       };
     }
     bar.appendChild(chip);
   }
 }
-
-/* 标签栏：数据源是全量标签（list_tags），点击=结构化筛选（不再塞进搜索框）。 */
-function renderTagBar() {
-  const bar = $('tag-bar');
-  bar.textContent = '';
-  const active = new Set(state.tagFilter);
-  const chip = (label, isActive, onClick, cls) => {
-    const s = document.createElement('span');
-    s.className = 'tag' + (cls ? ' ' + cls : '') + (isActive ? ' is-active' : '');
-    s.textContent = label;
-    s.onclick = onClick;
-    return s;
-  };
-  if (state.tagFilter.length || state.folderFilter !== null || $('search').value.trim()) {
-    bar.appendChild(chip('清除筛选', false, () => {
-      state.tagFilter = []; state.folderFilter = null; $('search').value = ''; refreshList();
-    }, 'tag-clear'));
-  }
-  for (const t of state.allTags) {
-    const c = chip(t, active.has(t), () => {
-      state.tagFilter = active.has(t)
-        ? state.tagFilter.filter(x => x !== t)
-        : [...state.tagFilter, t];
-      refreshList();
-    });
-    // 右键标签：重命名（批量改写所有笔记）/ 删除（从所有笔记移除该标签）
-    c.oncontextmenu = e => { e.preventDefault(); showTagMenu(e.clientX, e.clientY, t); };
-    bar.appendChild(c);
-  }
-  if (!state.allTags.length && !bar.childNodes.length) {
-    bar.hidden = true;
-  } else {
-    bar.hidden = false;
-  }
-}
-
-/* 标签右键菜单：重命名（批量改写全部笔记的 frontmatter）/ 删除（从所有笔记移除）。 */
-let tagMenuTarget = null;
-function showTagMenu(x, y, tag) {
-  tagMenuTarget = tag;
-  const m = $('tag-menu');
-  m.hidden = false;
-  const w = m.offsetWidth, h = m.offsetHeight;
-  m.style.left = Math.max(4, Math.min(x, window.innerWidth - w - 4)) + 'px';
-  m.style.top = Math.max(4, Math.min(y, window.innerHeight - h - 4)) + 'px';
-}
-function hideTagMenu() { $('tag-menu').hidden = true; }
-document.querySelectorAll('#tag-menu .dropdown-item').forEach(el => {
-  el.onclick = async () => {
-    const act = el.dataset.tagAct;
-    const tag = tagMenuTarget;
-    hideTagMenu();
-    if (!tag) return;
-    if (act === 'rename') {
-      const to = await promptInline('重命名标签（留空则删除该标签）', tag);
-      if (to === tag) return;
-      try {
-        const n = await invoke('rename_tag', { from: tag, to: to || '' });
-        state.tagFilter = state.tagFilter.map(t => (t === tag ? (to || '') : t)).filter(Boolean);
-        setStatus(`已更新 ${n} 篇笔记的标签`, 'ok');
-      } catch (e) { setStatus('重命名标签失败：' + e, 'error'); }
-    } else if (act === 'delete') {
-      try {
-        const n = await invoke('rename_tag', { from: tag, to: '' });
-        state.tagFilter = state.tagFilter.filter(t => t !== tag);
-        setStatus(`已从 ${n} 篇笔记移除标签「${tag}」`, 'ok');
-      } catch (e) { setStatus('删除标签失败：' + e, 'error'); }
-    }
-    refreshList();
-  };
-});
-document.addEventListener('click', e => { if (!e.target.closest('#tag-menu')) hideTagMenu(); });
-document.addEventListener('keydown', e => { if (e.key === 'Escape') hideTagMenu(); });
 
 /* 顶栏显示当前笔记相对路径，点击在资源管理器中定位。未落盘的新笔记隐藏。 */
 function updateHeaderPath(note) {
@@ -2170,6 +2104,11 @@ $('tags-input').addEventListener('input', scheduleAutosave);
 $('search').addEventListener('input', () => {
   clearTimeout(searchTimer);
   searchTimer = setTimeout(refreshList, 250);
+});
+/* 搜索范围下拉：切换后同步 placeholder 并立即重查 */
+$('search-mode').addEventListener('change', () => {
+  $('search').placeholder = SEARCH_PLACEHOLDER[$('search-mode').value] || '搜索…';
+  refreshList();
 });
 
 $('btn-new').onclick = newNote;

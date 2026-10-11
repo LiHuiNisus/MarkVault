@@ -26,8 +26,6 @@ pub fn run() {
             commands::read_note,
             commands::save_note,
             commands::search_notes,
-            commands::list_tags,
-            commands::rename_tag,
             commands::save_asset,
             commands::read_asset,
             commands::pick_image,

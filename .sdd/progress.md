@@ -1,5 +1,22 @@
 # MarkVault — 开发进度
 
+## 2026-10-11：移除标签栏，改为搜索范围下拉
+
+用户判断标签栏交互难用，改为在搜索框左侧加范围下拉，支持标签名模糊搜索。
+
+- 删除：`#tag-bar`、`#tag-menu` 及其 CSS；`renderTagBar`、`showTagMenu`/`hideTagMenu`
+  与标签右键菜单事件；`state.tagFilter`、`state.allTags`、`refreshList` 里的 `list_tags` 调用；
+  笔记行标签芯片点击由「填搜索框」改为「切到标签范围 + 填搜索框」。标签本身（frontmatter tags）
+  与 `store::set_tags` 未动，笔记行仍显示标签芯片。
+- 后端：删 `list_tags`、`rename_tag` 两条已无调用方的命令。`search_notes` 新增
+  `mode: Option<String>`——`all`（默认，标题+标签+正文）/ `title` / `content` / `tag`（标签名模糊）。
+- 前端：`#search-mode` 下拉（全部/标题/正文/标签）与 `#search` 并排；切换时同步 placeholder
+  并立即重查。标签范围 placeholder 为「模糊搜索标签名…」。
+- 浏览器实测（harness + mock 桥）：标签栏/右键菜单已消失；`title` 搜「工作」= 无匹配、
+  `content` 搜「工作」= 旅行计划、`tag` 搜「工作」= 会议纪要、`tag` 模糊搜「待」= 命中「待办」、
+  `all` 搜「工作」= 会议纪要+旅行计划；点笔记行标签芯片后下拉自动切到 `tag` 并筛出该篇。
+  47 测试全过。
+
 ## 2026-10-11：首次启动自动建库，去掉选目录弹窗
 
 用户要求：首次启动就在安装路径下建好笔记库目录，不弹选目录框。

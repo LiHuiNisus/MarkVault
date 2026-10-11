@@ -276,7 +276,8 @@ pub fn list_notes(sort: Option<String>) -> Vec<NoteMeta> {
     list_notes_sorted(vault_dir(), sort.as_deref())
 }
 
-/// 搜索：query 走标题/标签/正文全文；tags 与 folder 是结构化筛选（AND 组合，与 query 叠加）。
+/// 搜索：query 按 mode 决定搜索范围——all=标题+标签+正文（默认）、title=仅标题、
+/// content=仅正文、tag=仅标签名（模糊）。tags 与 folder 是结构化筛选（AND 组合，与 query 叠加）。
 /// tags 只比对 frontmatter 的标签，避免把"正文里恰好出现该词"的笔记带出来。
 #[tauri::command]
 pub fn search_notes(
@@ -284,12 +285,14 @@ pub fn search_notes(
     sort: Option<String>,
     tags: Option<Vec<String>>,
     folder: Option<String>,
+    mode: Option<String>,
 ) -> Vec<NoteMeta> {
     let dir = match vault_dir() {
         Some(d) => d,
         None => return vec![],
     };
     let q = query.trim().to_lowercase();
+    let mode = mode.unwrap_or_else(|| "all".into());
     let tag_filter: Vec<String> = tags
         .unwrap_or_default()
         .into_iter()
@@ -315,70 +318,26 @@ pub fn search_notes(
             if q.is_empty() {
                 return true;
             }
-            if m.title.to_lowercase().contains(&q) {
-                return true;
+            let in_title = || m.title.to_lowercase().contains(&q);
+            let in_tag = || m.tags.iter().any(|t| t.to_lowercase().contains(&q));
+            let in_content = || {
+                store::read_note(&dir, &m.file_name)
+                    .map(|n| n.content.to_lowercase().contains(&q))
+                    .unwrap_or(false)
+            };
+            match mode.as_str() {
+                "title" => in_title(),
+                "content" => in_content(),
+                "tag" => in_tag(),
+                _ => in_title() || in_tag() || in_content(),
             }
-            if m.tags.iter().any(|t| t.to_lowercase().contains(&q)) {
-                return true;
-            }
-            store::read_note(&dir, &m.file_name)
-                .map(|n| n.content.to_lowercase().contains(&q))
-                .unwrap_or(false)
         })
         .collect();
     sort_metas(&mut metas, sort.as_deref());
     metas
 }
 
-/// 列出所有已用标签（去重、排序）。不受搜索筛选影响，供标签栏展示完整集合。
-#[tauri::command]
-pub fn list_tags() -> Vec<String> {
-    let dir = match vault_dir() {
-        Some(d) => d,
-        None => return vec![],
-    };
-    let mut set = std::collections::BTreeSet::new();
-    for m in store::list_notes(&dir) {
-        for t in m.tags {
-            let t = t.trim().to_string();
-            if !t.is_empty() {
-                set.insert(t);
-            }
-        }
-    }
-    set.into_iter().collect()
-}
-
-/// 批量改写标签：把 from 标签在所有笔记里换成 to（to 为空表示删除该标签）。
-/// 返回被改动的笔记数。
-#[tauri::command]
-pub fn rename_tag(from: String, to: String) -> Result<usize, String> {
-    let dir = vault_dir().ok_or("未配置笔记文件夹")?;
-    let from = from.trim().to_string();
-    if from.is_empty() {
-        return Err("原标签不能为空".into());
-    }
-    let to = to.trim().to_string();
-    let mut changed = 0usize;
-    for m in store::list_notes(&dir) {
-        if !m.tags.iter().any(|t| t == &from) {
-            continue;
-        }
-        let mut tags: Vec<String> = m
-            .tags
-            .iter()
-            .map(|t| if t == &from { to.clone() } else { t.clone() })
-            .filter(|t| !t.is_empty())
-            .collect();
-        // 合并去重，保留首次出现顺序
-        let mut seen = std::collections::HashSet::new();
-        tags.retain(|t| seen.insert(t.clone()));
-        store::set_tags(&dir, &m.file_name, tags)?;
-        changed += 1;
-    }
-    Ok(changed)
-}
-
+/// 按 sort 取全量笔记列表（不带搜索），供前端无搜索时展示。
 fn list_notes_sorted(dir: Option<std::path::PathBuf>, sort: Option<&str>) -> Vec<NoteMeta> {
     let mut metas = match dir {
         Some(d) => store::list_notes(&d),
