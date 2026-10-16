@@ -88,6 +88,9 @@ function renderHighlight() {
 }
 
 /* ---------- 预览渲染 ---------- */
+/* 预览所见即编辑所见：段内单换行渲染为 <br>。
+   marked 默认把单换行合并进同一段，编辑页两行、预览一行，两侧对不上。 */
+marked.setOptions({ gfm: true, breaks: true });
 function render(md) {
   const html = marked.parse(md || '');
   $('preview').innerHTML = DOMPurify.sanitize(html, { ADD_TAGS: ['badges', 'u'], ADD_ATTR: ['tone'] });
@@ -1948,12 +1951,19 @@ function toggleTaskItem(li, cb) {
 /* 输入路径拆两级调度：高亮合并到动画帧，预览解析（marked + DOMPurify + 大纲 + 字数）
    较重，加短防抖。都不再每个按键同步全量重渲染，长文输入才不卡。 */
 let previewTimer = null, hlRaf = 0;
+/* 每次渲染挂序号：120ms 防抖期间用户又删/打了字，晚触发的回调必须以最新正文为准。
+   旧回调迟到时丢弃，否则预览显示的是中间态，和编辑区对不上（用户报的"删的内容预览不对"）。 */
+let renderSeq = 0;
 function onEditorInput() {
   if (!hlRaf) {
     hlRaf = requestAnimationFrame(() => { hlRaf = 0; renderHighlight(); });
   }
   clearTimeout(previewTimer);
-  previewTimer = setTimeout(() => render($('editor').value), 120);
+  const seq = ++renderSeq;
+  previewTimer = setTimeout(() => {
+    if (seq !== renderSeq) return; // 期间又有输入，本次已过期
+    render($('editor').value);
+  }, 120);
   scheduleAutosave();
 }
 
