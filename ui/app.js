@@ -9,6 +9,9 @@ const state = {
   folders: [], activeFolder: '',
   // 结构化筛选：folderFilter 为 null 表示不限、'' 表示只看根目录
   folderFilter: null,
+  // 「在此新建文档」显式指定的落点：null 表示没有指定，按筛选/选中文件夹推断。
+  // 不直接用 activeFolder 是因为点击顺序和筛选状态会把它冲掉。
+  pendingNewFolder: null,
   // 多选集合：存 file_name。用于批量移动。
   selected: new Set(),
 };
@@ -314,10 +317,12 @@ async function doSave() {
   // 若正开着文件夹筛选，则新笔记直接落在该文件夹里（所见即所得）。
   const folder = state.current.file_name
     ? folderOfKey(state.current.file_name)
-    : (state.folderFilter !== null ? state.folderFilter : state.activeFolder);
+    : saveFolderForNewNote();
   try {
     const meta = await invoke('save_note', { fileName: state.current.file_name || '', title, tags, content, folder });
     state.current = meta;
+    // 落点已消费：清掉显式指定，避免影响下一次新建
+    state.pendingNewFolder = null;
     state.dirty = false;
     LS.set('last_open', meta.file_name);
     updateHeaderPath(meta);
@@ -339,7 +344,18 @@ async function doSave() {
   }
 }
 
-/* 原 setStatus 定义已上移到保存区，这里保留其行为供全局复用。 */
+/* 新笔记的落点文件夹（唯一判定处，doSave、草稿占位行、状态栏提示共用）：
+   优先「在此新建文档」显式指定的文件夹，其次文件夹筛选，最后列表里选中的文件夹。 */
+function saveFolderForNewNote() {
+  if (state.pendingNewFolder !== null) return state.pendingNewFolder;
+  return state.folderFilter !== null ? state.folderFilter : state.activeFolder;
+}
+
+/* 顶部「新建文档」/ Ctrl+N：不带落点，按当前筛选或选中文件夹推断 */
+function newNoteDefault() {
+  state.pendingNewFolder = null;
+  newNote();
+}
 
 /* ---------- 列表 ---------- */
 let searchTimer = null;
@@ -665,8 +681,10 @@ async function refreshList() {
   names.delete('');
   const folderNames = [...names].sort((a, b) => a.localeCompare(b, 'zh-Hans-CN'));
   const rootNotes = buckets.get('') || [];
-  // 正在编辑但尚未落盘的新笔记：先建好占位行，空列表/有列表都要显示
-  const draftItem = state.current && !state.current.file_name ? buildDraftItem($('doc-title').value) : null;
+  // 正在编辑但尚未落盘的新笔记：先建好占位行，空列表/有列表都要显示。
+  // 落点与 doSave 保持一致，这样占位行会出现在它将来真正所属的文件夹里。
+  const draftFolder = state.current && !state.current.file_name ? saveFolderForNewNote() : null;
+  const draftItem = draftFolder !== null ? buildDraftItem($('doc-title').value, draftFolder) : null;
   if (!state.notes.length && !folderNames.length) {
     if (draftItem) ul.appendChild(draftItem);
     else {
@@ -680,7 +698,8 @@ async function refreshList() {
   // 扁平排列：根标头（有文件夹时才显示）→ 根笔记 → 各文件夹（标头 + 其笔记）
   // 同组内保持 Rust 给的 modified 倒序，不重排。
   const frag = document.createDocumentFragment();
-  if (draftItem) frag.appendChild(draftItem);
+  // 目标是根目录（或目标文件夹当前不可见）时，占位行留在最上方
+  if (draftItem && (!draftFolder || !folderNames.includes(draftFolder))) frag.appendChild(draftItem);
   if (folderNames.length) frag.appendChild(buildRootHeader(rootNotes.length));
   for (const n of rootNotes) {
     const el = buildNoteItem(n, q);
@@ -691,6 +710,13 @@ async function refreshList() {
     const isCollapsed = collapsedFolders.has(name);
     frag.appendChild(buildFolderHeader(name, (buckets.get(name) || []).length, isCollapsed, state.activeFolder === name));
     const notes = buckets.get(name) || [];
+    // 占位行跟着它所属的文件夹走：紧跟文件夹标头，折叠时一并隐藏
+    if (draftItem && draftFolder === name) {
+      draftItem.classList.add('in-folder');
+      draftItem.dataset.folder = name;
+      draftItem.hidden = isCollapsed;
+      frag.appendChild(draftItem);
+    }
     if (!notes.length) {
       const empty = buildFolderEmpty(name);
       empty.hidden = isCollapsed;
@@ -709,8 +735,9 @@ async function refreshList() {
   ul.appendChild(frag);
 }
 
-/* 草稿占位行：点「新建」后立刻可见，不再等 2 秒自动保存才出现条目。 */
-function buildDraftItem(title) {
+/* 草稿占位行：点「新建」后立刻可见，不再等 2 秒自动保存才出现条目。
+   folder 传入落点文件夹名（'' 表示根目录），在提示里写明，避免用户不知道会存到哪。 */
+function buildDraftItem(title, folder) {
   const li = document.createElement('li');
   li.className = 'draft';
   const nt = document.createElement('div');
@@ -718,7 +745,9 @@ function buildDraftItem(title) {
   nt.textContent = title || '未命名文档';
   const nm = document.createElement('div');
   nm.className = 'nm';
-  nm.textContent = '编辑中…（自动保存后落到列表）';
+  nm.textContent = folder
+    ? `编辑中…（自动保存到「${folder}」）`
+    : '编辑中…（自动保存到根目录）';
   li.appendChild(nt);
   li.appendChild(nm);
   li.onclick = e => { e.stopPropagation(); $('doc-title').focus(); };
@@ -1064,8 +1093,10 @@ function newFolderFlow() {
   input.onblur = () => finish(true);
 }
 
-/* 在指定文件夹下新建：先记目标文件夹，再走常规新建流程 */
+/* 在指定文件夹下新建：显式记下目标文件夹，再走常规新建流程。
+   不走 activeFolder：activeFolder 会被折叠/选中操作改写，显式值更可靠。 */
 function newNoteInFolder(folder) {
+  state.pendingNewFolder = folder || '';
   state.activeFolder = folder || '';
   refreshList();
   newNote();
@@ -1079,6 +1110,9 @@ async function renameFolderFlow(oldName) {
     if (state.activeFolder === oldName) state.activeFolder = name;
     // 筛选中的文件夹改名：筛选条件跟着换，否则列表会空掉
     if (state.folderFilter === oldName) state.folderFilter = name;
+    // 刚在旧文件夹里点了「在此新建文档」还没保存时改名：落点跟着换，
+    // 否则自动保存会按旧文件夹名重新把它建出来。
+    if (state.pendingNewFolder === oldName) state.pendingNewFolder = name;
     // 正在编辑的笔记路径前缀必须跟着改，否则下次自动保存会按旧路径写回，
     // 把已改名的旧文件夹重新建出来（笔记分裂成新旧两份）。
     if (state.current && folderOfKey(state.current.file_name) === oldName) {
@@ -1146,6 +1180,8 @@ async function deleteFolderFlow(name) {
     if (state.activeFolder === name) state.activeFolder = '';
     // 被删的文件夹若正是筛选目标，清掉筛选，否则列表会空白
     if (state.folderFilter === name) state.folderFilter = null;
+    // 还没保存的新笔记原本要落进来，改投根目录，避免自动保存时又把它建出来
+    if (state.pendingNewFolder === name) state.pendingNewFolder = '';
     collapsedFolders.delete(name);
     saveCollapsed();
     setStatus('已删除文件夹', 'ok');
@@ -1326,9 +1362,7 @@ async function newNote() {
   document.title = '未命名文档 - MarkVault';
   // 明确告知新笔记会落到哪，避免用户以为"点了新建却什么都没发生"；
   // 左栏同时插入占位条，让"已创建"立刻可见。
-  const where = state.folderFilter !== null
-    ? (state.folderFilter || '根目录')
-    : (state.activeFolder || '根目录');
+  const where = saveFolderForNewNote() || '根目录';
   await refreshList();
   setStatus('新笔记将保存到「' + where + '」，输入即自动保存', 'ok');
   $('doc-title').focus();
@@ -2131,7 +2165,7 @@ $('search').addEventListener('input', () => {
   searchTimer = setTimeout(refreshList, 250);
 });
 
-$('btn-new').onclick = newNote;
+$('btn-new').onclick = newNoteDefault;
 $('btn-new-folder').onclick = newFolderFlow;
 $('btn-save').onclick = doSave;
 /* 打开本地文档：Rust 端弹文件选择框（支持多选），复制进笔记库后打开最后一篇 */
@@ -2223,7 +2257,7 @@ document.addEventListener('keydown', e => {
   if (ctrl && e.key.toLowerCase() === 's') { e.preventDefault(); doSave(); }
   else if (ctrl && e.key.toLowerCase() === 'b') { e.preventDefault(); focusEditorThen(formatBold); }
   else if (ctrl && e.key.toLowerCase() === 'i') { e.preventDefault(); focusEditorThen(formatItalic); }
-  else if (ctrl && e.key.toLowerCase() === 'n') { e.preventDefault(); newNote(); }
+  else if (ctrl && e.key.toLowerCase() === 'n') { e.preventDefault(); newNoteDefault(); }
   else if (ctrl && e.key.toLowerCase() === 'k') { e.preventDefault(); focusEditorThen(insertLink); }
   else if (ctrl && e.key.toLowerCase() === 'p') { e.preventDefault(); $('search').focus(); $('search').select(); }
   else if (ctrl && e.shiftKey && e.key.toLowerCase() === 'l') { e.preventDefault(); cycleLayout(); }
