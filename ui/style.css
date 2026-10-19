@@ -719,6 +719,10 @@ button, input, textarea { font-family: inherit; }
 .editor-highlight .hl-codeblock { color: var(--editor-text); }
 .editor-stack textarea {
   background: transparent; color: transparent; caret-color: var(--accent);
+  /* 关掉 textarea 自带的滚动条：外层 .editor-body 才是滚动容器，textarea 尺寸被撑到全文高度。
+     若保留 overflow:auto，长文里 textarea 会自己长出竖直滚动条，文本盒比高亮层窄 8px，
+     两层折行位置不一致，鼠标点选/拖选会落到错误的字符上。 */
+  overflow: hidden;
 }
 .editor-stack textarea::placeholder { color: var(--text-muted); opacity: 0.55; }
 .editor-stack textarea::selection { background: var(--editor-match-bg); color: transparent; }
