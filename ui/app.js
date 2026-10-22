@@ -73,10 +73,13 @@ function hlLine(raw) {
   return applyInlineHl(chunk);
 }
 
+/* 上一次渲染高亮层时用的正文。跳转前比对一次，过期就重渲染，避免拿旧几何定位。 */
+let hlSrc = null;
 function renderHighlight() {
   const val = $('editor').value;
   const lines = val.split('\n');
   inCode = false;
+  hlSrc = val;
   $('editor-highlight').innerHTML = lines.map(l => `<div class="hl-line">${hlLine(l) || '​'}</div>`).join('');
   const hlLines = $('editor-highlight').querySelectorAll('.hl-line');
   const gutter = $('editor-gutter');
@@ -177,12 +180,15 @@ function renderOutline() {
     btn.onclick = () => {
       const ta = $('editor');
       const idx = ta.value.split('\n').slice(0, h.line).join('\n').length + (h.line ? 1 : 0);
-      const lineH = parseFloat(getComputedStyle(ta).lineHeight) || 20;
-      // 先定位预览（它会抢占同步锁），再滚编辑区，避免两侧锚点互相拉扯
+      // 先锁同步、再定位预览、最后滚编辑区，避免两侧锚点互相拉扯。
+      // 锁只需覆盖跳转本身与紧随其后的滚动事件，太长会让用户随后手动滚动时同步失灵。
+      lockSync(350);
       syncPreviewToLine(h.line);
-      $('editor-scroll').scrollTop = Math.max(0, h.line * lineH - $('editor-scroll').clientHeight / 3);
+      scrollEditorToLine(h.line);
       ta.focus();
       ta.setSelectionRange(idx, idx);
+      // 聚焦与选区会触发 textarea 自身滚动，位置可能被挪走，再校正一次
+      scrollEditorToLine(h.line);
       setActiveOutline(i);
     };
     list.appendChild(btn);
@@ -217,16 +223,23 @@ function setActiveOutline(idx) {
   });
 }
 
-/* 编辑区滚动时高亮当前章节：按"最后一个行号小于当前滚动行的标题"判定 */
+/* 编辑区滚动时高亮当前章节：按「最后一个顶端不超过当前滚动位置的标题」判定。
+   不能再用 行号 × 行高 换算滚动行：长段软换行后，同样行号对应的真实像素差很远，
+   会一直高亮错章节。改为直接量高亮层里每个标题行的真实位置。 */
 function updateOutlineFromEditor() {
   if (!state.outlineOpen) return;
   const hs = parseHeadings($('editor').value).filter(h => outlineShowAll || h.level <= 3);
   if (!hs.length) return;
-  const ta = $('editor');
-  const lineH = parseFloat(getComputedStyle(ta).lineHeight) || 20;
-  const cur = ($('editor-scroll').scrollTop + 40) / lineH;
+  const scroll = $('editor-scroll');
+  const cur = scroll.scrollTop + 40;
   let idx = 0;
-  hs.forEach((h, i) => { if (h.line <= cur) idx = i; });
+  // 标题按行序递增，越过当前位置即可停，长文里不必每次量到底
+  for (let i = 0; i < hs.length; i++) {
+    const pos = hlLineTop(hs[i].line);
+    if (pos === null) continue;
+    if (pos <= cur) idx = i;
+    else break;
+  }
   setActiveOutline(idx);
 }
 
@@ -235,7 +248,21 @@ function updateOutlineFromEditor() {
    改为标题锚点对齐：以两侧"最近的标题"为基准，把锚点标题的偏移对齐后再映射，
    没有标题可锚定时退回百分比。 */
 let syncFrom = null, syncResetTimer = null;
+/* 程序化跳转（大纲点击）期间的硬锁：两侧的锚点同步全部让路。
+   否则预览那边被 syncPreviewToLine 滚动后触发的 syncScroll 会反向把编辑区
+   按「行号 × 行高」估算重定位，刚滚好的位置被拽走。 */
+let syncLockUntil = 0;
+function lockSync(ms) { syncLockUntil = Date.now() + ms; }
+/* 高亮层里源码第 line 行的真实像素顶端（相对滚动内容）。
+   长段落软换行后，「行号 × 行高」与真实位置差很远，同步与定位都必须走真实几何。 */
+function hlLineTop(line) {
+  const scroll = $('editor-scroll');
+  const el = $('editor-highlight').querySelectorAll('.hl-line')[line];
+  if (!el) return null;
+  return el.getBoundingClientRect().top - scroll.getBoundingClientRect().top + scroll.scrollTop;
+}
 function syncScroll(src, dst) {
+  if (Date.now() < syncLockUntil) return;
   if (syncFrom && syncFrom !== src) return;
   syncFrom = src;
   clearTimeout(syncResetTimer);
@@ -244,31 +271,37 @@ function syncScroll(src, dst) {
   if (srcMax <= 1) return;
   const toEditor = dst === $('editor-scroll');
   const hs = $('preview').querySelectorAll('h1,h2,h3,h4,h5,h6');
-  const srcLines = parseHeadings($('editor').value);
+  const srcLines = parseHeadings($('editor').value).slice(0, hs.length);
   if (hs.length && srcLines.length) {
     const ta = $('editor');
     const lineH = parseFloat(getComputedStyle(ta).lineHeight) || 20;
-    if (!toEditor) {
-      // 编辑区 → 预览：找当前视口顶端的源码行，定位其上方最近标题
-      const curLine = (src.scrollTop + 40) / lineH;
-      let i = -1;
-      srcLines.forEach((h, k) => { if (h.line <= curLine && k < hs.length) i = k; });
-      if (i >= 0) {
-        const anchorSrc = srcLines[i].line * lineH;
-        const frac = Math.max(0, src.scrollTop - anchorSrc);
-        dst.scrollTop = Math.max(0, hs[i].offsetTop + frac * (hs[i + 1] ? 0.9 : 1) - 40);
-        return;
+    const srcTop = i => {
+      const t = hlLineTop(srcLines[i].line);
+      return t === null ? srcLines[i].line * lineH : t;
+    };
+    // 编辑区侧：源码第 i 个标题的真实像素位置；预览侧：offsetTop
+    const srcPos = i => toEditor ? hs[i].offsetTop : srcTop(i);
+    const dstPos = i => toEditor ? srcTop(i) : hs[i].offsetTop;
+    const pos = src.scrollTop + 40;
+    // 找当前位置上方最近的标题；标题按行序递增，越过就停，长文里不必每次量到底
+    let i = -1;
+    for (let k = 0; k < srcLines.length; k++) {
+      if (srcPos(k) <= pos) i = k;
+      else break;
+    }
+    if (i >= 0) {
+      /* 在两个标题之间做线性插值，而不是把当前偏移按固定系数搬过去。
+         固定系数会把位置推过下一个标题，两侧显示相邻两个章节（差一章）。
+         末尾没有下一个标题时按住区间起点对齐。 */
+      const a = srcPos(i), b = i + 1 < srcLines.length ? srcPos(i + 1) : null;
+      const da = dstPos(i), db = i + 1 < srcLines.length ? dstPos(i + 1) : null;
+      if (b !== null && db !== null && b > a) {
+        const r = Math.min(1, Math.max(0, (pos - a) / (b - a)));
+        dst.scrollTop = Math.max(0, da + r * (db - da) - 40);
+      } else {
+        dst.scrollTop = Math.max(0, da + Math.max(0, pos - a) - 40);
       }
-    } else {
-      // 预览 → 编辑区：找当前视口顶端上方最近的标题，滚到其源码行
-      const top = src.scrollTop;
-      let i = -1;
-      hs.forEach((h, k) => { if (k < srcLines.length && h.offsetTop - 40 <= top) i = k; });
-      if (i >= 0) {
-        const frac = Math.max(0, top - hs[i].offsetTop);
-        dst.scrollTop = Math.max(0, srcLines[i].line * lineH + frac * 0.9);
-        return;
-      }
+      return;
     }
   }
   // 兜底：百分比映射
@@ -1646,13 +1679,34 @@ function formatInlineCode() {
   wrapSel('`', '`', '代码', /^`+$/);
 }
 
-/* 引用：对选中文字逐行加 '> '，无选区时插入占位（与 MarkPane formatQuote 一致） */
+/* 把 [s, e) 向外扩到整行边界。
+   引用、列表、代码块都是块级标记，只对整行生效：选区落在行中间时按原样插入会得到
+   `hello - world`、`abc``` ` 这类不生效的 Markdown，预览里仍是普通段落。 */
+function expandToLines(s, e) {
+  const v = $('editor').value;
+  const lineStart = v.lastIndexOf('\n', s - 1) + 1;
+  const nl = v.indexOf('\n', e);
+  return [lineStart, nl === -1 ? v.length : nl];
+}
+
+/* 引用：整行加 '> '；整段已全部引用时剥掉一层（再点一次取消）；空行插入占位 */
 function formatQuote() {
   const ta = $('editor');
   const s = ta.selectionStart, e = ta.selectionEnd, v = ta.value;
-  const sel = v.slice(s, e) || '引用';
-  const out = '> ' + sel.replace(/\n/g, '\n> ');
-  applyEdit(s, e, out, s, s + out.length);
+  const [rs, re] = expandToLines(s, e);
+  const raw = v.slice(rs, re);
+  const lines = raw.split('\n');
+  // 全部非空行都已带 '> ' 时按开关语义剥一层，避免反复点击叠成 '> > >'
+  const quoted = lines.filter(l => l.trim());
+  if (quoted.length && quoted.every(l => /^\s*>/.test(l))) {
+    const out = lines.map(l => l.replace(/^(\s*)>\s?/, '$1')).join('\n');
+    applyEdit(rs, re, out, rs, rs + out.length);
+    return;
+  }
+  const sel = raw || '引用';
+  // 部分行已引用时只给未引用的行补 '> '，否则会叠成 '> > ' 双重引用
+  const out = sel.split('\n').map(l => (/^\s*>/.test(l) ? l : '> ' + l)).join('\n');
+  applyEdit(rs, re, out, rs, rs + out.length);
 }
 
 /* 列表：stripListMarker + applyListPrefix 与 MarkPane 一致；有序列表自动重编号。
@@ -1678,7 +1732,9 @@ function prefixLines(mode) {
   const hasSel = s !== e;
   let rs, re, content, checkFirst = false;
   if (hasSel) {
-    rs = s; re = e; content = v.slice(s, e);
+    // 选区落在行中间时扩到整行：`- ` 前缀插在行首才生效，插在行中只是普通文字
+    [rs, re] = expandToLines(s, e);
+    content = v.slice(rs, re);
   } else {
     rs = v.lastIndexOf('\n', s - 1) + 1;
     const lineEndIdx = v.indexOf('\n', s);
@@ -1705,7 +1761,9 @@ function formatOrderedCircleList() {
   const hasSel = s !== e;
   let rs, re, content;
   if (hasSel) {
-    rs = s; re = e; content = v.slice(s, e);
+    // 圆形有序列表输出块级 <ol>，同样必须整行替换，否则 HTML 混在段落中间不渲染
+    [rs, re] = expandToLines(s, e);
+    content = v.slice(rs, re);
   } else {
     rs = v.lastIndexOf('\n', s - 1) + 1;
     const lineEndIdx = v.indexOf('\n', s);
@@ -1719,6 +1777,8 @@ function formatOrderedCircleList() {
     let body = stripListMarker(line, 'task');
     body = stripListMarker(body, 'ordered');
     body = stripListMarker(body, 'unordered');
+    // 标题行转成列表项时也要去掉 # 前缀，否则输出 <li>### 标题</li>
+    body = body.replace(/^#{1,6}\s*/, '');
     return '  <li>' + esc(body.trim()) + '</li>';
   });
   const html = '<ol class="ol-circle">\n' + items.join('\n') + '\n</ol>\n';
@@ -1737,14 +1797,16 @@ function insertHeading(level) {
   applyEdit(lineStart, lineEnd, out, lineStart + out.length, lineStart + out.length);
 }
 
-/* 代码块：选中内容包进 ``` 围栏，无选区时用占位，插入后全选 */
+/* 代码块：选中内容包进 ``` 围栏，无选区时用占位，插入后全选。
+   围栏是块级标记，必须独占整行：插在行中间会变成 `abc``` ` 这种行内代码，不渲染成代码块。 */
 function insertCodeBlock() {
   const ta = $('editor');
   const s = ta.selectionStart, e = ta.selectionEnd, v = ta.value;
-  let sel = v.slice(s, e);
-  if (!sel || /^`+$/.test(sel)) sel = '代码';
+  const [rs, re] = expandToLines(s, e);
+  let sel = v.slice(rs, re);
+  if (!sel.trim() || /^`+$/.test(sel)) sel = '代码';
   const ins = '```\n' + sel + '\n```';
-  applyEdit(s, e, ins, s, s + ins.length);
+  applyEdit(rs, re, ins, rs, rs + ins.length);
 }
 
 /* 链接：Tauri WebView2 不支持 prompt()，用内置弹窗输入 URL */
@@ -1803,12 +1865,13 @@ function insertTable() {
       '| ' + Array.from({ length: cols }, () => '   ').join(' | ') + ' |');
     const table = [head, sep, ...body].join('\n');
     const ta = $('editor');
-    const s = ta.selectionStart, e = ta.selectionEnd, v = ta.value;
+    // 表格是独立块，不能覆盖已选文字：把插入点收敛到选区末尾，正文原样保留
+    const s = ta.selectionEnd, v = ta.value;
     const before = v.slice(0, s);
     const lead = before.length === 0 || before.endsWith('\n\n') ? '' : (before.endsWith('\n') ? '\n' : '\n\n');
-    const after = v.slice(e);
+    const after = v.slice(s);
     const trail = after.length === 0 || after.startsWith('\n') ? '\n' : '\n\n';
-    applyEdit(s, e, lead + table + trail, s + lead.length + 2, s + lead.length + 2);
+    applyEdit(s, s, lead + table + trail, s + lead.length + 2, s + lead.length + 2);
   });
 }
 
@@ -1892,14 +1955,14 @@ async function handleImagePaste(e) {
   return false;
 }
 
-/* 水平线：前后不足两个空行时自动补齐 */
+/* 水平线：前后不足两个空行时自动补齐。分隔线是独立块，不覆盖已选文字 */
 function insertHorizontalRule() {
   const ta = $('editor');
-  const s = ta.selectionStart, e = ta.selectionEnd, v = ta.value;
-  const before = v.slice(0, s), after = v.slice(e);
+  const s = ta.selectionEnd, v = ta.value;
+  const before = v.slice(0, s), after = v.slice(s);
   const lead = before.length === 0 || before.endsWith('\n\n') ? '' : (before.endsWith('\n') ? '\n' : '\n\n');
   const trail = after.length === 0 || after.startsWith('\n\n') ? '' : (after.startsWith('\n') ? '\n' : '\n\n');
-  applyEdit(s, e, lead + '---' + trail, s + lead.length + 3, s + lead.length + 3);
+  applyEdit(s, s, lead + '---' + trail, s + lead.length + 3, s + lead.length + 3);
 }
 
 /* 标签徽章：<badges tone="x">文字</badges>，预览渲染为彩色圆角胶囊 */
@@ -2312,6 +2375,71 @@ function runFind() {
   $('find-count').textContent = `${findIdx + 1}/${findHits.length}`;
   gotoFindHit();
 }
+/* 把源码第 line 行滚到编辑区中间。
+   不能用 line * 行高估算：长行会软换行，几行之后的真实位置就远超估算，
+   命中会被滚到视口之外（表现为"跳了但看不到文字"）。改按高亮层里对应
+   .hl-line 的真实位置定位；高亮层还没渲染时再退回行高估算。 */
+function scrollEditorToLine(line) {
+  const scroll = $('editor-scroll');
+  const el = $('editor-highlight').querySelectorAll('.hl-line')[line];
+  if (el) {
+    const box = scroll.getBoundingClientRect();
+    const top = el.getBoundingClientRect().top - box.top + scroll.scrollTop;
+    scroll.scrollTop = Math.max(0, top - scroll.clientHeight / 2);
+    return;
+  }
+  const lineH = parseFloat(getComputedStyle($('editor')).lineHeight) || 20;
+  scroll.scrollTop = Math.max(0, line * lineH - scroll.clientHeight / 2);
+}
+/* 取高亮层某行内第 col 个字符的矩形（高亮层文本与源码逐字符对应）。
+   只量这一个字符：整段量会得到跨多个视觉行的并集矩形，位置就没意义了。 */
+function hlTextRectAt(el, col) {
+  const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+  let acc = 0, node;
+  while ((node = walker.nextNode())) {
+    const len = node.nodeValue.length;
+    if (col < acc + len) {
+      const off = col - acc;
+      const range = document.createRange();
+      range.setStart(node, off);
+      range.setEnd(node, Math.min(len, off + 1));
+      const r = range.getBoundingClientRect();
+      if (r.height > 0) return r;
+      // 恰落在行尾：退一格取前一个字符的矩形
+      if (off > 0) {
+        const back = document.createRange();
+        back.setStart(node, off - 1);
+        back.setEnd(node, off);
+        const rb = back.getBoundingClientRect();
+        if (rb.height > 0) return rb;
+      }
+      return null;
+    }
+    acc += len;
+  }
+  return null;
+}
+/* 把源码位置 pos 滚到编辑区中间。
+   只按行定位不够：命中落在被软换行撑到几千像素高的长行里时，把整行居中后
+   命中字符仍在视口之外。改为直接定位命中字符自己的矩形，拿不到再退回按行。 */
+function scrollEditorToPos(pos) {
+  const v = $('editor').value;
+  const line = v_countLines(v, pos);
+  const col = pos - (v.lastIndexOf('\n', pos - 1) + 1);
+  const scroll = $('editor-scroll');
+  // 高亮层与正文对不上（替换后同一帧内跳转）说明几何是旧的，先重渲染再量
+  const hlBox = $('editor-highlight');
+  if (hlSrc !== v) renderHighlight();
+  const hlLines = hlBox.querySelectorAll('.hl-line');
+  const el = hlLines[line];
+  const rect = el ? hlTextRectAt(el, col) : null;
+  if (rect) {
+    const top = rect.top - scroll.getBoundingClientRect().top + scroll.scrollTop;
+    scroll.scrollTop = Math.max(0, top - scroll.clientHeight / 2);
+    return;
+  }
+  scrollEditorToLine(line);
+}
 function gotoFindHit(focusEditor) {
   if (!findHits.length) return;
   findIdx = (findIdx + findHits.length) % findHits.length;
@@ -2322,10 +2450,8 @@ function gotoFindHit(focusEditor) {
     ta.focus();
     ta.setSelectionRange(s, e);
   }
-  // 滚动让命中行可见（按行高估算）
-  const line = v_countLines(ta.value, s);
-  const lineH = parseFloat(getComputedStyle(ta).lineHeight) || 20;
-  $('editor-scroll').scrollTop = Math.max(0, line * lineH - $('editor-scroll').clientHeight / 2);
+  // 滚动让命中可见
+  scrollEditorToPos(s);
   $('find-count').textContent = `${findIdx + 1}/${findHits.length}`;
 }
 function v_countLines(v, pos) { return v.slice(0, pos).split('\n').length - 1; }
