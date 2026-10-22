@@ -8,3 +8,8 @@ src-tauri/gen/schemas/
 /tmp-tests/
 # 本地笔记库（用户数据，不入库）
 /notes/
+
+# ctx-guard 运行时状态（每次会话都会变，不入库）
+.sdd/.ctx-guard-state.json
+# ctx-guard 自动生成的交接快照（每次会话重写，不入库）
+.sdd/context-handoff.md

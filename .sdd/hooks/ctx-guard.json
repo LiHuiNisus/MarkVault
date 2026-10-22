@@ -1,0 +1,8 @@
+{
+  "windowTokens": 0,
+  "fallbackWindowTokens": 1000000,
+  "warnAt": 0.55,
+  "urgentAt": 0.70,
+  "criticalAt": 0.82,
+  "handoffEveryTokens": 60000
+}
