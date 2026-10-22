@@ -1,5 +1,33 @@
 # MarkVault — 开发进度
 
+## 2026-10-22：rename_note 路径校验收口 + 清理 side-rail 死代码
+
+全量通读源码后的两处修正，均为隐患清理，不改变用户可见行为。
+
+### 1. `src-tauri/src/store.rs` — `rename_note`
+
+- 修复函数签名被压成一行（`Result<NoteMeta, String> {    let mut note...`）的格式破损。
+- 落盘路径从 `dir.join(file_name)` 改为 `resolve_note_path(dir, file_name)?`。原写法绕过了 `validate_rel_path`，只因 Windows 把 `/` 和 `\` 视为等价才碰巧能处理 `"文件夹/笔记.md"`；换成其它平台或非法输入即失效。现在与 `read_note` / `write_note` / `set_tags` 走同一校验入口。
+- 去掉多余的 `std::fs::create_dir_all(dir)`：进入函数时 `read_note` 已证明目录存在，且这里要建的是 vault 根目录，不是笔记所在文件夹。
+
+### 2. 删除 `side-rail` 死代码
+
+- `ui/index.html`：删除 `<nav class="side-rail" aria-label="快捷操作" hidden>` 整块。该导航永久 `hidden`，内部两个 `rail-group` 与 `rail-spacer` 全为空 div，`ui/app.js` 无任何引用（全文检索确认）。
+- `ui/style.css`：删除 `/* ===== 左侧图标栏 ===== */` 段（`.side-rail[hidden]`、`.side-rail`、`.rail-group`、`.rail-spacer`、`.side-rail button` 及其 hover、`.icon`、`.dropdown`、`.dropdown-menu`、`#rail-outline[aria-pressed="true"]`），以及 `@media print` 隐藏列表里的 `.side-rail` 选择器。`.icon` / `.dropdown` / `.dropdown-menu` 的通用样式在别处（如 `.header-actions` 下）另有定义，删除后顶栏与工具栏下拉不受影响。
+
+### 验证
+
+- `node --check ui/app.js` 通过
+- `cargo build` 无 warning
+- `cargo test` 全通过：30 个 lib 单测 + 20 个 folders 集成测试 + 1 个回收站集成测试，0 失败
+
+### 遗留（未处理）
+
+- `search_notes` 逐条读取全文，`list_notes` 已读过一遍，存在 O(n) 双读。
+- `pick_vault_dir` / `set_config` 在 `lib.rs` 注册但前端无调用（换库按钮已按需求移除），保留为备用入口。
+
+另：`notes/`（本地笔记库，用户数据）已加入 `.gitignore`。
+
 ## 2026-10-11：产品验收（subagent 交叉审核）+ 发现的 6 个缺陷修复
 
 用户要求：调用 subagent 对产品功能逐一操作、交叉审核、产品验收，发现 bug 自动修复。

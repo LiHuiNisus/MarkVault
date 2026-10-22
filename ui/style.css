@@ -514,29 +514,6 @@ button, input, textarea { font-family: inherit; }
 .submenu .dropdown-item { font-size: 12px; }
 .submenu .dropdown-item.is-current { color: var(--accent); font-weight: 600; }
 
-/* ===== 左侧图标栏 ===== */
-.side-rail[hidden] { display: none; }
-.side-rail {
-  width: 56px; flex: 0 0 56px;
-  display: flex; flex-direction: column; align-items: center; gap: 4px;
-  padding: 10px 0; background: var(--panel-bg); border-radius: var(--radius-lg);
-  z-index: 6; align-self: stretch;
-}
-.side-rail .rail-group { display: flex; flex-direction: column; align-items: stretch; gap: 6px; width: 100%; padding: 0 4px; }
-.side-rail .rail-spacer { flex: 1; min-height: 8px; }
-.side-rail button, .side-rail .dropdown > button {
-  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px;
-  width: 100%; min-height: 48px; padding: 7px 2px 5px;
-  border: none; border-radius: var(--radius-sm);
-  background: transparent; color: var(--text-muted); cursor: pointer;
-  transition: color .18s, background .18s;
-}
-.side-rail button:hover, .side-rail .dropdown > button:hover { background: var(--accent-soft); color: var(--accent); }
-.side-rail button .icon { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; flex-shrink: 0; }
-.side-rail .dropdown { width: 100%; }
-.side-rail .dropdown-menu { left: calc(100% + 8px); top: 0; margin-top: 0; }
-#rail-outline[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); }
-
 /* ===== 目录面板 ===== */
 .outline-panel {
   flex: 0 0 0px; width: 0; min-width: 0; max-width: var(--outline-panel-width);
@@ -890,7 +867,7 @@ body.resizing { user-select: none; cursor: col-resize; }
 @media print {
   /* 去系统页眉页脚：边距交给 @page，浏览器勾选项默认沿用此设定 */
   @page { size: A4; margin: 16mm 14mm; }
-  #sidebar, .side-rail, .editor-block, .header-bar, .outline-panel, .preview-toolbar { display: none !important; }
+  #sidebar, .editor-block, .header-bar, .outline-panel, .preview-toolbar { display: none !important; }
   body, #app, .workspace, .workspace-main { overflow: visible; height: auto; background: #fff; }
   .content-shell { display: block; overflow: visible; }
   .preview-block { display: block !important; border-radius: 0; }

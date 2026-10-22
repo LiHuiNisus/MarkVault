@@ -329,15 +329,16 @@ pub fn set_tags(dir: &Path, file_name: &str, tags: Vec<String>) -> Result<(), St
     std::fs::write(&path, raw).map_err(|e| e.to_string())
 }
 
-pub fn rename_note(dir: &Path, file_name: &str, new_title: &str) -> Result<NoteMeta, String> {    let mut note = read_note(dir, file_name)?;
+pub fn rename_note(dir: &Path, file_name: &str, new_title: &str) -> Result<NoteMeta, String> {
+    let mut note = read_note(dir, file_name)?;
     let modified = note.meta.modified.clone();
     note.meta.title = new_title.to_string();
     // 直接落盘，跳过 write_note（它会刷新 modified）；仅标题变化不改"最近修改"排序位置
     let mut meta = note.meta;
     meta.modified = modified;
     let raw = serialize_note(&meta, &note.content);
-    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    std::fs::write(dir.join(file_name), raw).map_err(|e| e.to_string())?;
+    let path = resolve_note_path(dir, file_name)?;
+    std::fs::write(&path, raw).map_err(|e| e.to_string())?;
     Ok(meta)
 }
 

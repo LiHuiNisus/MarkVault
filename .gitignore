@@ -6,3 +6,5 @@ src-tauri/gen/schemas/
 /uninstall.exe
 # 一次性调试脚本
 /tmp-tests/
+# 本地笔记库（用户数据，不入库）
+/notes/
