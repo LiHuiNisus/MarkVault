@@ -45,18 +45,23 @@ fn now_stamp() -> String {
 }
 
 /// 同秒重名防覆盖：文件已存在时追加 -2、-3…直到可用。
+/// 保留原扩展名：富文本笔记是 .html，不能被改回 .md。
 fn dedup_name(dir: &std::path::Path, name: String) -> String {
     if name.is_empty() || !dir.join(&name).exists() {
         return name;
     }
-    let stem = name.trim_end_matches(".md").to_string();
+    let ext = match name.rsplit_once('.') {
+        Some((_, e)) if !e.is_empty() && e.len() <= 8 && !e.contains('/') => format!(".{}", e),
+        _ => ".md".to_string(),
+    };
+    let stem = name[..name.len() - ext.len()].to_string();
     for n in 2..1000 {
-        let candidate = format!("{}-{}.md", stem, n);
+        let candidate = format!("{}-{}{}", stem, n, ext);
         if !dir.join(&candidate).exists() {
             return candidate;
         }
     }
-    format!("{}-{}.md", stem, chrono::Utc::now().timestamp_millis())
+    format!("{}-{}{}", stem, chrono::Utc::now().timestamp_millis(), ext)
 }
 
 /// 取 title 前 20 个字符；is_alphanumeric 为 Unicode 感知，天然保留中文。
@@ -82,6 +87,7 @@ pub fn save_note(
     tags: Vec<String>,
     content: String,
     folder: Option<String>,
+    kind: Option<String>,
 ) -> Result<NoteMeta, String> {
     let dir = vault_dir().ok_or("未配置笔记文件夹")?;
     // 新笔记：生成文件名，并落到指定文件夹（folder 为空表示根目录）
@@ -93,7 +99,10 @@ pub fn save_note(
             }
             None => dir.clone(),
         };
-        let base = dedup_name(&sub, format!("{}-{}.md", now_stamp(), slugify(&title)));
+        // 类型只在创建时生效：扩展名据此确定，之后改名/移动都保留
+        let kind = kind.as_deref().unwrap_or(store::KIND_MD);
+        let ext = store::ext_for_kind(kind);
+        let base = dedup_name(&sub, format!("{}-{}.{}", now_stamp(), slugify(&title), ext));
         match folder.as_deref().filter(|f| !f.is_empty()) {
             Some(f) => format!("{}/{}", f, base),
             None => base,
@@ -110,6 +119,7 @@ pub fn save_note(
         file_name: name.clone(),
         folder: name.split_once('/').map(|(f, _)| f.to_string()).unwrap_or_default(),
         title,
+        kind: store::kind_of_name(&name).unwrap_or(store::KIND_MD).to_string(),
         tags,
         created,
         modified: String::new(),
@@ -318,9 +328,13 @@ pub fn search_notes(
             if terms.is_empty() {
                 return true;
             }
-            // 正文只读一次，供所有关键词复用
+            // 正文只读一次，供所有关键词复用。
+            // 富文本笔记的正文是 HTML：先剥标签再匹配，否则搜 "strong" 会命中所有加粗的笔记。
             let content = store::read_note(&dir, &m.file_name)
-                .map(|n| n.content.to_lowercase())
+                .map(|n| {
+                    let raw = if m.kind == store::KIND_RICH { strip_html_tags(&n.content) } else { n.content };
+                    raw.to_lowercase()
+                })
                 .unwrap_or_default();
             note_matches(m, &content, &terms)
         })
@@ -332,6 +346,21 @@ pub fn search_notes(
 /// 按空白拆分查询串为关键词（已小写）。空串得到空向量。
 fn split_terms(q: &str) -> Vec<String> {
     q.split_whitespace().map(|t| t.to_string()).collect()
+}
+
+/// 把 HTML 正文压成纯文本供搜索：去掉标签与注释，块级标签换成空格，避免相邻词粘连。
+fn strip_html_tags(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut in_tag = false;
+    for c in html.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' => { in_tag = false; out.push(' '); }
+            _ if !in_tag => out.push(c),
+            _ => {}
+        }
+    }
+    out
 }
 
 /// 关键词匹配：每个词都要命中标题、标签或正文之一（AND）；空关键词表视为全部命中。
@@ -365,8 +394,9 @@ fn sort_metas(metas: &mut [NoteMeta], sort: Option<&str>) {
 }
 
 /// 删除笔记：前端已确认文件名，此处仅删除（保留给已有流程复用）。
+/// 返回值 true=进了系统回收站，false=回收站不可用、已永久删除（前端要如实告知用户）。
 #[tauri::command]
-pub fn delete_note(file_name: String) -> Result<(), String> {
+pub fn delete_note(file_name: String) -> Result<bool, String> {
     let dir = vault_dir().ok_or("未配置笔记文件夹")?;
     store::delete_note(&dir, &file_name)
 }
@@ -418,11 +448,18 @@ fn import_one(
     meta.created = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
     meta.modified = String::new();
     // 优先保留原文件名（用户自己起的名更有意义），非法字符逐步丢弃后仍空则回退 slug
+    // 扩展名跟着源文件走：导入 .html 仍是一篇富文本笔记，不会被改写成 .md
     let safe_stem = sanitize_stem(&src_stem);
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .filter(|e| store::kind_of_name(&format!("x.{}", e)).is_some())
+        .unwrap_or_else(|| "md".to_string());
     let desired = if safe_stem.is_empty() {
-        format!("{}.md", slugify(&meta.title))
+        format!("{}.{}", slugify(&meta.title), ext)
     } else {
-        format!("{}.md", safe_stem)
+        format!("{}.{}", safe_stem, ext)
     };
     let base = dedup_name(dest_dir, desired);
     let file_name = match target {
@@ -472,7 +509,7 @@ pub fn import_note(
         .file()
         .set_title("打开 Markdown 文档")
         .set_parent(&window)
-        .add_filter("Markdown", &["md", "markdown"])
+        .add_filter("Markdown / 富文本", &["md", "markdown", "html", "htm"])
         .blocking_pick_files();
     let paths = match picked {
         Some(p) => p,
@@ -624,6 +661,7 @@ mod search_tests {
             file_name: format!("{}.md", title),
             folder: String::new(),
             title: title.to_string(),
+            kind: String::new(),
             tags: tags.iter().map(|t| t.to_string()).collect(),
             created: String::new(),
             modified: String::new(),
@@ -664,5 +702,19 @@ mod search_tests {
         // note_matches 约定：title/tags 内部自会小写，content 由调用方预先小写
         assert!(note_matches(&meta("HELLO world", &[]), "", &terms));
         assert!(note_matches(&meta("x", &[]), "say hello there", &terms));
+    }
+
+    #[test]
+    fn html_content_is_stripped_before_matching() {
+        // 富文本笔记正文是 HTML：标签必须剥掉，否则搜 "strong" 会命中所有加粗的笔记
+        let stripped = strip_html_tags("<p><strong>加粗</strong>正文</p>");
+        // 标签位置换成空格：搜索按关键词拆分，多余空格无害
+        assert_eq!(stripped.split_whitespace().collect::<String>(), "加粗正文");
+        assert!(!stripped.contains('<'));
+        // 相邻块级元素之间留空格，避免两个词粘成一个
+        let spaced = strip_html_tags("<p>甲</p><p>乙</p>");
+        assert!(spaced.contains("甲") && spaced.contains("乙"));
+        let terms = split_terms("strong");
+        assert!(!note_matches(&meta("笔记", &[]), &strip_html_tags("<p><strong>x</strong></p>").to_lowercase(), &terms));
     }
 }

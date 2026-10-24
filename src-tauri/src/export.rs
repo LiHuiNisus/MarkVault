@@ -25,11 +25,12 @@ pub fn export_note(
     let default_name = match safe_title {
         Some(t) => format!("{}.{}", t, ext),
         None => {
-            let base = file_name
+            let raw = file_name
                 .rsplit(['/', '\\'])
                 .next()
-                .unwrap_or(file_name.as_str())
-                .trim_end_matches(".md");
+                .unwrap_or(file_name.as_str());
+            // 富文本笔记是 .html，也要剥干净，避免导出成 "标题.html.docx"
+            let base = crate::store::strip_note_ext(raw);
             format!("{}.{}", base, ext)
         }
     };

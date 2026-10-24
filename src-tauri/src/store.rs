@@ -11,6 +11,9 @@ pub struct NoteMeta {
     pub folder: String,
     #[serde(default)]
     pub title: String,
+    /// 笔记类型："md"（Markdown）或 "rich"（富文本 HTML）。由磁盘扩展名推出，不写进 frontmatter。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub kind: String,
     #[serde(default)]
     pub tags: Vec<String>,
     #[serde(default)]
@@ -26,6 +29,45 @@ pub struct Note {
     pub content: String,
 }
 
+/// 笔记的两种类型：Markdown 与富文本。类型在创建时确定，之后不可更改。
+/// 类型落在文件扩展名上（.md / .html），磁盘是唯一事实来源，不写进 frontmatter。
+pub const KIND_MD: &str = "md";
+pub const KIND_RICH: &str = "rich";
+
+/// 类型对应的文件扩展名（不含点）。
+pub fn ext_for_kind(kind: &str) -> &'static str {
+    if kind == KIND_RICH { "html" } else { "md" }
+}
+
+/// 从文件名/相对路径推导笔记类型。非笔记扩展名返回 None。
+pub fn kind_of_name(name: &str) -> Option<&'static str> {
+    let ext = name.rsplit('.').next()?.to_ascii_lowercase();
+    match ext.as_str() {
+        "md" | "markdown" => Some(KIND_MD),
+        "html" | "htm" => Some(KIND_RICH),
+        _ => None,
+    }
+}
+
+/// 去掉笔记扩展名，得到文件名主干。非笔记扩展名原样返回。
+pub fn strip_note_ext(name: &str) -> &str {
+    for ext in [".md", ".markdown", ".html", ".htm"] {
+        if let Some(stem) = name.strip_suffix(ext) {
+            return stem;
+        }
+        // 大小写不敏感：Windows 上 `A.MD` 也能打开。
+        // 中文文件名是多字节，切之前必须确认落在字符边界上，否则 panic。
+        let cut = name.len().saturating_sub(ext.len());
+        if cut > 0
+            && name.is_char_boundary(cut)
+            && name[cut..].eq_ignore_ascii_case(ext)
+        {
+            return &name[..cut];
+        }
+    }
+    name
+}
+
 /// frontmatter 采用 JSON（YAML 子集）：第一行 `---`，第二行 JSON 对象，第三行 `---`。
 /// CRLF 文件先归一化为 LF，否则 `\n---\n` 永远匹配不到（Windows 记事本编辑过的文件会丢元数据）。
 pub fn parse_frontmatter(raw: &str) -> (NoteMeta, String) {
@@ -35,6 +77,7 @@ pub fn parse_frontmatter(raw: &str) -> (NoteMeta, String) {
         file_name: String::new(),
         folder: String::new(),
         title: String::new(),
+        kind: String::new(),
         tags: vec![],
         created: String::new(),
         modified: String::new(),
@@ -62,11 +105,14 @@ pub fn parse_frontmatter(raw: &str) -> (NoteMeta, String) {
 }
 
 pub fn serialize_note(meta: &NoteMeta, content: &str) -> String {
-    let json = serde_json::to_string(meta).unwrap_or_default();
+    // kind 由磁盘扩展名推出，不落进 frontmatter：文件改名后元数据不会自相矛盾
+    let mut meta = meta.clone();
+    meta.kind = String::new();
+    let json = serde_json::to_string(&meta).unwrap_or_default();
     format!("---\n{}\n---\n{}", json, content)
 }
 
-/// 扫描单侧目录中的 .md，rel_prefix 为 None（根）或 Some("文件夹名")。
+/// 扫描单侧目录中的笔记（.md / .html），rel_prefix 为 None（根）或 Some("文件夹名")。
 fn collect_notes(dir: &Path, rel_prefix: Option<&str>, metas: &mut Vec<NoteMeta>) {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
@@ -74,17 +120,18 @@ fn collect_notes(dir: &Path, rel_prefix: Option<&str>, metas: &mut Vec<NoteMeta>
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        // 只认笔记扩展名：.md / .markdown / .html / .htm。图片、临时文件一律跳过。
+        if kind_of_name(&name).is_none() {
             continue;
         }
-        let name = path.file_name().unwrap().to_string_lossy().to_string();
         let raw = match std::fs::read_to_string(&path) {
             Ok(r) => r,
             Err(_) => continue,
         };
         let (mut meta, _) = parse_frontmatter(&raw);
         if meta.title.is_empty() {
-            meta.title = name.trim_end_matches(".md").to_string();
+            meta.title = strip_note_ext(&name).to_string();
         }
         if meta.created.is_empty() {
             // created 为空时回退到文件系统创建时间
@@ -101,6 +148,7 @@ fn collect_notes(dir: &Path, rel_prefix: Option<&str>, metas: &mut Vec<NoteMeta>
         }
         // file_name 存相对路径：根目录是裸文件名，文件夹内是 "文件夹/文件名"；folder 单独存一份便于前端分组
         meta.folder = rel_prefix.unwrap_or("").to_string();
+        meta.kind = kind_of_name(&name).unwrap_or(KIND_MD).to_string();
         meta.file_name = match rel_prefix {
             Some(p) => format!("{}/{}", p, name),
             None => name,
@@ -188,8 +236,10 @@ pub fn read_note(dir: &Path, file_name: &str) -> Result<Note, String> {
     if meta.title.is_empty() {
         // 无 frontmatter 时用文件名兜底；文件夹路径需剥掉前缀
         let base = file_name.rsplit('/').next().unwrap_or(file_name);
-        meta.title = base.trim_end_matches(".md").to_string();
+        meta.title = strip_note_ext(base).to_string();
     }
+    // 类型永远由磁盘扩展名决定，frontmatter 里即便写了 kind 也不采信
+    meta.kind = kind_of_name(file_name).unwrap_or(KIND_MD).to_string();
     // 磁盘位置才是事实来源：frontmatter 里的 folder 一律忽略
     meta.folder = match file_name.rsplit_once('/') {
         Some((f, _)) => f.to_string(),
@@ -212,13 +262,18 @@ pub fn write_note(dir: &Path, file_name: &str, note: &Note) -> Result<(), String
 }
 
 /// 删除笔记：交给系统回收站，用户可以自己到回收站里找回。
-/// 回收站不可用时（如网络盘）退回直接删除，保证删除动作不会卡住。
-pub fn delete_note(dir: &Path, file_name: &str) -> Result<(), String> {
+/// 回收站不可用时（如网络盘）退回直接删除，保证删除动作不会卡住——但这条路径是
+/// **永久删除**，调用方必须知道。返回 `true` 表示进了回收站，`false` 表示已永久删除。
+pub fn delete_note(dir: &Path, file_name: &str) -> Result<bool, String> {
     let path = resolve_note_path(dir, file_name)?;
     if !path.exists() {
         return Err("笔记不存在".into());
     }
-    move_to_recycle_bin(&path).or_else(|_| std::fs::remove_file(&path).map_err(|e| e.to_string()))
+    if move_to_recycle_bin(&path).is_ok() {
+        return Ok(true);
+    }
+    std::fs::remove_file(&path).map_err(|e| e.to_string())?;
+    Ok(false)
 }
 
 /// 把文件送进系统回收站（要求用户能从回收站恢复）。
@@ -377,11 +432,61 @@ mod tests {
     }
 
     #[test]
+    fn test_kind_from_extension_and_not_serialized() {
+        assert_eq!(kind_of_name("a.md"), Some(KIND_MD));
+        assert_eq!(kind_of_name("a.MD"), Some(KIND_MD));
+        assert_eq!(kind_of_name("a.markdown"), Some(KIND_MD));
+        assert_eq!(kind_of_name("a.html"), Some(KIND_RICH));
+        assert_eq!(kind_of_name("a.HTM"), Some(KIND_RICH));
+        assert_eq!(kind_of_name("a.png"), None);
+        assert_eq!(kind_of_name("noext"), None);
+        assert_eq!(strip_note_ext("标题.html"), "标题");
+        assert_eq!(strip_note_ext("标题.md"), "标题");
+        assert_eq!(strip_note_ext("标题.txt"), "标题.txt");
+        // 类型由磁盘扩展名推出，不能写进 frontmatter：文件改名后元数据会自相矛盾
+        let meta = NoteMeta {
+            file_name: "n.html".into(),
+            folder: String::new(),
+            title: "T".into(),
+            kind: KIND_RICH.into(),
+            tags: vec![],
+            created: String::new(),
+            modified: String::new(),
+        };
+        let raw = serialize_note(&meta, "x");
+        assert!(!raw.contains("\"kind\""), "{}", raw);
+    }
+
+    #[test]
+    fn test_list_notes_sees_html_and_md() {
+        let dir = tmp_dir();
+        fs::write(
+            dir.join("a.html"),
+            "---\n{\"title\":\"富文本\",\"tags\":[],\"created\":\"2026-01-01T00:00:00\",\"modified\":\"2026-01-02T00:00:00\"}\n---\n<p>x</p>",
+        )
+        .unwrap();
+        fs::write(
+            dir.join("b.md"),
+            "---\n{\"title\":\"Markdown\",\"tags\":[],\"created\":\"2026-01-01T00:00:00\",\"modified\":\"2026-01-01T00:00:00\"}\n---\n# x",
+        )
+        .unwrap();
+        let list = list_notes(&dir);
+        assert_eq!(list.len(), 2);
+        let rich = list.iter().find(|m| m.file_name == "a.html").unwrap();
+        assert_eq!(rich.kind, KIND_RICH);
+        let md = list.iter().find(|m| m.file_name == "b.md").unwrap();
+        assert_eq!(md.kind, KIND_MD);
+        // 读取时同样按扩展名还原类型
+        assert_eq!(read_note(&dir, "a.html").unwrap().meta.kind, KIND_RICH);
+    }
+
+    #[test]
     fn test_serialize_roundtrip() {
         let meta = NoteMeta {
             file_name: "20261005-100000-测试.md".into(),
             folder: String::new(),
             title: "测试笔记".into(),
+            kind: String::new(),
             tags: vec!["a".into()],
             created: "2026-10-05T10:00:00".into(),
             modified: "2026-10-05T10:00:00".into(),
@@ -406,7 +511,7 @@ mod tests {
     fn test_write_note_updates_modified() {
         let dir = tmp_dir();
         let meta = NoteMeta {
-            file_name: "n.md".into(), folder: String::new(), title: "N".into(), tags: vec![],
+            file_name: "n.md".into(), folder: String::new(), title: "N".into(), kind: String::new(), tags: vec![],
             created: "2026-01-01T00:00:00".into(), modified: "2026-01-01T00:00:00".into(),
         };
         write_note(&dir, "n.md", &Note { meta, content: "c".into() }).unwrap();
@@ -458,6 +563,7 @@ mod rename_tests {
             file_name: "r.md".into(),
             folder: String::new(),
             title: "旧".into(),
+            kind: String::new(),
             tags: vec![],
             created: "2026-01-01T00:00:00".into(),
             modified: "2026-01-02T00:00:00".into(),

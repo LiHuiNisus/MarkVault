@@ -7,6 +7,11 @@ const state = {
   notes: [], current: null, dirty: false, config: null,
   layout: 'both', outlineOpen: false, sidebarOpen: true,
   folders: [], activeFolder: '',
+  // 当前文档类型：'md'（Markdown 源码 + 预览）或 'rich'（富文本所见即所得）。
+  // 类型在创建时确定，落盘后不可更改（kindLocked）。磁盘扩展名是唯一事实来源。
+  kind: 'md', kindLocked: false,
+  // Quill 实例（懒创建）与「data URL → .assets/ 相对路径」映射，保存时据此还原图片引用
+  rich: null, richAssets: new Map(),
   // 结构化筛选：folderFilter 为 null 表示不限、'' 表示只看根目录
   folderFilter: null,
   // 「在此新建文档」显式指定的落点：null 表示没有指定，按筛选/选中文件夹推断。
@@ -127,6 +132,257 @@ function renderWordCount(md) {
   if (hdr) hdr.textContent = (cjk + cjkPunct) + ' 字';
 }
 
+/* ---------- 文档类型：Markdown / 富文本 ----------
+   类型在创建时确定，落盘后不可更改。磁盘扩展名（.md / .html）是唯一事实来源，
+   前端只维护 state.kind 做编辑界面切换，不试图在两种格式之间做有损转换。 */
+function isRich() { return state.kind === 'rich'; }
+
+/* 当前正文：Markdown 取 textarea，富文本取 Quill 的 HTML（图片已还原成 .assets/ 相对路径） */
+function currentContent() {
+  return isRich() ? richHtmlForSave() : $('editor').value;
+}
+
+/* 懒创建 Quill。工具栏用 snow 主题的完整格式集，但不含表格——Quill 2 核心没有表格模块。 */
+function ensureQuill() {
+  if (state.rich) return state.rich;
+  const toolbar = [
+    [{ header: [1, 2, 3, 4, 5, 6, false] }],
+    ['bold', 'italic', 'underline', 'strike'],
+    [{ list: 'ordered' }, { list: 'bullet' }],
+    ['blockquote', 'code-block'],
+    ['link', 'image'],
+    ['clean'],
+  ];
+  const q = new Quill('#rich-editor', {
+    theme: 'snow',
+    placeholder: '开始输入…',
+    modules: { toolbar: { container: toolbar, handlers: { image: richImageHandler } } },
+  });
+  /* Quill 的链接气泡默认按 document.body 夹取边界，而它自己挂在 .ql-container 里，
+     容器又是 overflow:hidden。选区靠左时气泡向左溢出容器，左半边直接被裁掉。
+     把夹取边界收窄到容器本身，气泡就永远留在容器内。 */
+  if (q.theme && q.theme.tooltip) q.theme.tooltip.boundsContainer = q.container;
+  // 粘贴图片走与 Markdown 模式相同的校验与落盘路径
+  q.root.addEventListener('paste', e => { richImagePaste(q, e); }, true);
+  q.on('text-change', (delta, old, source) => {
+    // 程序化装载（silent）不是用户在输入，不该把空档升级成草稿
+    if (source !== 'silent') beginDraft();
+    renderRichWordCount();
+    scheduleAutosave();
+    renderOutline();
+  });
+  state.rich = q;
+  return q;
+}
+
+/* 富文本图片：落进 .assets/，DOM 里显示 data URL（WebView2 加载不到相对路径），
+   保存时再由 richHtmlForSave 换回相对路径。 */
+function richInsertAsset(q, rel, dataUrl) {
+  state.richAssets.set(rel, dataUrl);
+  const range = q.getSelection(true) || { index: q.getLength() - 1, length: 0 };
+  q.insertEmbed(range.index, 'image', dataUrl, 'user');
+  q.setSelection(range.index + 1, 0, 'user');
+}
+
+function richImageHandler() {
+  const q = state.rich;
+  if (!q) return;
+  invoke('pick_image').then(async picked => {
+    if (!picked) return;
+    try {
+      const rel = await invoke('save_asset', { dataBase64: picked.data, ext: picked.ext });
+      richInsertAsset(q, rel, 'data:image/' + (picked.ext === 'jpg' ? 'jpeg' : picked.ext) + ';base64,' + picked.data);
+      setStatus('已插入图片', 'ok');
+    } catch (err) {
+      const msg = String(err);
+      setStatus(msg.includes('格式') || msg.includes('10M') ? msg : '插入图片失败：' + msg, 'error');
+    }
+  }).catch(err => setStatus('插入图片失败：' + err, 'error'));
+}
+
+function richImagePaste(q, e) {
+  const cd = e.clipboardData;
+  if (!cd) return false;
+  const items = cd.items;
+  if (items) {
+    for (const it of items) {
+      if (it.kind !== 'file' || !it.type.startsWith('image/')) continue;
+      const file = it.getAsFile();
+      if (!file) continue;
+      e.preventDefault();
+      e.stopPropagation();
+      if (!ALLOWED_IMAGE_TYPES.includes(file.type.toLowerCase())) { setStatus(IMAGE_EXT_HINT, 'error'); return true; }
+      if (file.size > MAX_IMAGE_BYTES) { setStatus(IMAGE_SIZE_HINT, 'error'); return true; }
+      file.arrayBuffer().then(async buf => {
+        const bytes = new Uint8Array(buf);
+        const ext = file.type.toLowerCase().includes('png') ? 'png' : 'jpg';
+        const rel = await invoke('save_asset', { dataBase64: bytesToBase64(bytes), ext });
+        richInsertAsset(q, rel, 'data:image/' + (ext === 'jpg' ? 'jpeg' : ext) + ';base64,' + bytesToBase64(bytes));
+        setStatus('已粘贴图片到 ' + rel, 'ok');
+      }).catch(err => setStatus('粘贴图片失败：' + err, 'error'));
+      return true;
+    }
+  }
+  // 从网页复制图文时，图片不是 file item，而是以 data URL 藏在 text/html 里。
+  // 不接管的话 Quill 会原样接收，整段 base64 直接写进 .html，笔记文件迅速膨胀。
+  const html = cd.getData ? cd.getData('text/html') : '';
+  if (html && /<img\b[^>]*\bsrc\s*=\s*["']data:image\//i.test(html)) {
+    e.preventDefault();
+    e.stopPropagation();
+    externalizeInlineImages(html).then(rewritten => {
+      const range = q.getSelection(true);
+      q.clipboard.dangerouslyPasteHTML(range.index, rewritten, 'user');
+      setStatus('已粘贴内容与图片', 'ok');
+    }).catch(err => {
+      const msg = String(err && err.message || err);
+      setStatus(msg === IMAGE_EXT_HINT || msg === IMAGE_SIZE_HINT ? msg : '粘贴图片失败：' + msg, 'error');
+    });
+    return true;
+  }
+  return false;
+}
+
+/* 把 HTML 里内联的 data URL 图片逐个落盘成 .assets/ 文件。
+   返回的 HTML 仍使用 data URL（换成 .assets/ 相对路径会让 WebView2 真的发请求、必然 404），
+   但同时在 state.richAssets 里登记 相对路径 -> data URL，保存时由 richHtmlForSave 反向替换。
+   任一图片格式/体积不合规就整体抛错：正文半截落盘比不落盘更糟。 */
+async function externalizeInlineImages(html) {
+  const urls = [...html.matchAll(/<img\b[^>]*\bsrc\s*=\s*["'](data:image\/[^"']+)["']/gi)].map(m => m[1]);
+  const out = new Map();   // 原始串 -> 规范化后的 data URL
+  const rels = [];
+  for (const url of urls) {
+    if (out.has(url)) continue;
+    const m = url.match(/^data:image\/(png|jpe?g);base64,([\s\S]+)$/i);
+    if (!m) throw new Error(IMAGE_EXT_HINT);
+    const ext = m[1].toLowerCase() === 'png' ? 'png' : 'jpg';
+    const base64 = m[2].replace(/\s/g, '');
+    if (Math.floor(base64.length * 3 / 4) > MAX_IMAGE_BYTES) throw new Error(IMAGE_SIZE_HINT);
+    const rel = await invoke('save_asset', { dataBase64: base64, ext });
+    const dataUrl = 'data:image/' + (ext === 'jpg' ? 'jpeg' : ext) + ';base64,' + base64;
+    state.richAssets.set(rel, dataUrl);
+    rels.push(rel);
+    out.set(url, dataUrl);
+  }
+  let rewritten = html;
+  for (const [orig, norm] of out) rewritten = rewritten.split(orig).join(norm);
+  if (rels.length) setStatus('已粘贴 ' + rels.length + ' 张图片', 'ok');
+  return rewritten;
+}
+
+/* 保存前：把 DOM 里的 data URL 图片换回 .assets/ 相对路径，文件里不留 base64 大块。
+   全程在字符串上做替换：只要把 ".assets/x.png" 写进任何 DOM 节点的 src，
+   浏览器就会真的发一个请求（离线克隆节点也一样），WebView2 里必然 404。 */
+function richHtmlForSave() {
+  if (!state.rich) return '';
+  const clone = state.rich.root.cloneNode(true);
+  clone.querySelectorAll('.ql-ui').forEach(el => el.remove());
+  // 贴进来的外部 HTML 可能带 <img src="x">、blob:、相对路径——这些落盘后必然显示成破图，
+  // 且没有任何补救途径。只保留两种 src：本次会话登记过（保存时换回 .assets/ 相对路径）
+  // 的内联图，以及能自解析的 http(s) 远程图。其余连标签一起丢掉。
+  const known = new Set(state.richAssets.values());
+  clone.querySelectorAll('img').forEach(el => {
+    const src = (el.getAttribute('src') || '').trim();
+    if (known.has(src) || /^https?:\/\//i.test(src)) return;
+    if (el.alt) el.replaceWith(clone.ownerDocument.createTextNode(el.alt));
+    else el.remove();
+  });
+  let html = clone.innerHTML;
+  for (const [rel, dataUrl] of state.richAssets) {
+    if (!dataUrl) continue;
+    html = html.split(dataUrl).join(rel);
+  }
+  return html;
+}
+
+/* 载入：把 .assets/ 相对路径换成 data URL（与预览的 enhanceImages 同一套 read_asset）。
+   同样在字符串阶段替换，未命中的先塞占位像素，避免任何对 .assets/ 的真实请求。 */
+const TINY_PX = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
+function richLoadHtml(html) {
+  const q = ensureQuill();
+  state.richAssets.clear();
+  const pending = [];
+  // 逐个 img 标签处理：命中缓存的直接换 data URL，未命中的先占位并排队回填
+  const rewritten = (html || '').replace(/<img\b[^>]*>/gi, tag => {
+    const m = tag.match(/\bsrc\s*=\s*"([^"]*)"/i) || tag.match(/\bsrc\s*=\s*'([^']*)'/i);
+    if (!m) return tag;
+    const rel = m[1].replace(/^\.\//, '');
+    if (!/^\.?assets\//.test(rel) && !rel.startsWith('assets/')) return tag;
+    const cached = assetCache.get(rel);
+    if (cached) {
+      state.richAssets.set(rel, cached);
+      return tag.replace(m[0], 'src="' + cached + '"');
+    }
+    pending.push(rel);
+    return tag.replace(m[0], 'src="' + TINY_PX + '" data-asset-rel="' + rel + '"');
+  });
+  q.setContents([], 'silent');
+  q.clipboard.dangerouslyPasteHTML(rewritten, 'silent');
+  q.history.clear();
+  // Quill 会克隆节点，按出现顺序对齐回填
+  const live = [...q.root.querySelectorAll('img[src="' + TINY_PX + '"]')];
+  pending.forEach((rel, i) => {
+    const target = live[i];
+    invoke('read_asset', { rel }).then(url => {
+      assetCache.set(rel, url);
+      state.richAssets.set(rel, url);
+      if (target && target.isConnected) target.src = url;
+    }).catch(() => {
+      if (target) target.alt = (target.alt || '') + '（图片未找到）';
+    });
+  });
+  renderRichWordCount();
+}
+
+function renderRichWordCount() {
+  // 从未创建过 Quill（纯 Markdown 用户）时让 Markdown 侧的字数计算负责
+  if (!state.rich) return;
+  const stripped = state.rich.getText().trim();
+  const cjk = (stripped.match(/[一-鿿]/g) || []).length;
+  const cjkPunct = (stripped.match(/[　-〿＀-￯]/g) || []).length;
+  const words = (stripped.replace(/[一-鿿　-〿＀-￯]/g, ' ').match(/[A-Za-z0-9_]+/g) || []).length;
+  $('word-count').textContent = (cjk + cjkPunct) + ' 字 · ' + words + ' 词';
+  $('header-word-count').textContent = (cjk + cjkPunct) + ' 字';
+}
+
+/* 切换编辑界面。locked 为真时类型开关只作为只读徽标展示。 */
+function applyKind(kind, locked) {
+  state.kind = kind === 'rich' ? 'rich' : 'md';
+  state.kindLocked = !!locked;
+  const rich = isRich();
+  const shell = $('main-shell');
+  shell.classList.toggle('is-rich', rich);
+  document.querySelector('.editor-block').classList.toggle('is-rich', rich);
+  $('rich-host').hidden = !rich;
+  $('editor-scroll').hidden = rich;
+  const sw = $('kind-switch');
+  sw.classList.toggle('locked', state.kindLocked);
+  sw.querySelectorAll('button').forEach(b => {
+    b.setAttribute('aria-pressed', String(b.dataset.kind === state.kind));
+    b.title = state.kindLocked
+      ? '文档类型创建后不可更改'
+      : (b.dataset.kind === 'rich' ? '富文本文档：所见即所得' : 'Markdown 文档：源码 + 实时预览');
+  });
+  // 富文本模式没有独立预览，布局强制单栏；切回时恢复用户原来的布局
+  if (rich) ensureQuill();
+  setLayout(rich ? 'edit' : LS.get('layout', 'both'), !rich);
+  // 富文本模式固定单栏，「编辑 + 预览 / 仅预览」无从选择，视图切换置灰
+  const viewBtn = $('row-view');
+  if (viewBtn) {
+    viewBtn.disabled = rich;
+    viewBtn.title = rich ? '富文本模式固定为单栏' : '视图';
+  }
+  updateExportMenu();
+}
+
+/* 富文本笔记没有「导出 Markdown」：HTML 转 Markdown 有损，不给半截结果 */
+function updateExportMenu() {
+  const mdItem = document.querySelector('#export-menu .dropdown-item[data-fmt="md"]');
+  if (mdItem) mdItem.hidden = isRich();
+  const pngItem = document.querySelector('#export-menu .dropdown-item[data-fmt="png"]');
+  if (pngItem) pngItem.hidden = isRich();
+}
+
+
 /* ---------- 目录 ----------
    大纲从**源码**解析（不依赖预览 DOM），因此「仅编辑」模式下也能用、也能跳。
    每条记录源码行号，点击滚动编辑区到该行，并同步把预览带到对应标题。 */
@@ -157,9 +413,33 @@ function parseHeadings(md) {
   headingCache = { src, out };
   return out;
 }
+/* 富文本大纲：直接从 Quill 的标题元素读，点击就滚到那个元素 */
+function renderRichOutline(list) {
+  const hs = state.rich ? [...state.rich.root.querySelectorAll('h1,h2,h3,h4,h5,h6')] : [];
+  hs.forEach((el, i) => {
+    const level = +el.tagName.slice(1);
+    const btn = document.createElement('button');
+    btn.className = 'outline-item level-' + level;
+    btn.innerHTML = '<span class="outline-item-dot"></span>';
+    const txt = document.createElement('span');
+    txt.className = 'outline-item-text';
+    txt.textContent = el.textContent || '';
+    btn.appendChild(txt);
+    btn.onclick = () => {
+      el.scrollIntoView({ block: 'center', behavior: 'auto' });
+      setActiveOutline(i);
+    };
+    list.appendChild(btn);
+  });
+  if (!hs.length) {
+    list.innerHTML = '<div class="outline-empty">暂无标题，在格式菜单里选标题样式</div>';
+  }
+}
+
 function renderOutline() {
   const list = $('outline-list');
   list.innerHTML = '';
+  if (isRich()) return renderRichOutline(list);
   const all = parseHeadings($('editor').value);
   const hs = outlineShowAll ? all : all.filter(h => h.level <= 3);
   if (!all.length) {
@@ -308,10 +588,30 @@ function syncScroll(src, dst) {
   const ratio = src.scrollTop / srcMax;
   dst.scrollTop = ratio * (dst.scrollHeight - dst.clientHeight);
 }
+/* 滚动位置按笔记记住：重开同一条笔记时回到上次读到的地方。
+   只存内存 + localStorage，键是笔记相对路径；切换笔记/刷新都靠它恢复。 */
+const SCROLL_KEY = 'mv_scrollPos';
+function saveScrollPos() {
+  if (isRich() || !state.current || !state.current.file_name) return;
+  let map;
+  try { map = JSON.parse(LS.get(SCROLL_KEY, '{}')) || {}; } catch { map = {}; }
+  map[state.current.file_name] = $('editor-scroll').scrollTop;
+  LS.set(SCROLL_KEY, JSON.stringify(map));
+}
+function restoreScrollPos() {
+  if (isRich() || !state.current || !state.current.file_name) return;
+  let map;
+  try { map = JSON.parse(LS.get(SCROLL_KEY, '{}')) || {}; } catch { map = {}; }
+  const y = map[state.current.file_name];
+  // 内容可能已被外部删短，超过当前可滚高度时浏览器会自己夹到上限，无需额外判断
+  if (typeof y === 'number' && y > 0) $('editor-scroll').scrollTop = y;
+}
+
 $('editor-scroll').addEventListener('scroll', () => {
   syncScroll($('editor-scroll'), $('preview'));
   clearTimeout(outlineTimer);
   outlineTimer = setTimeout(updateOutlineFromEditor, 80);
+  saveScrollPos();
 });
 $('preview').addEventListener('scroll', () => {
   syncScroll($('preview'), $('editor-scroll'));
@@ -345,15 +645,19 @@ async function doSave() {
   saveMaxTimer = null;
   const title = $('doc-title').value.trim() || '无标题';
   const tags = $('tags-input').value.split(/[,，]/).map(s => s.trim()).filter(Boolean);
-  const content = $('editor').value;
+  const content = currentContent();
   // 新笔记落到当前选中的文件夹；已有笔记的路径以 state.current.file_name 为准。
   // 若正开着文件夹筛选，则新笔记直接落在该文件夹里（所见即所得）。
   const folder = state.current.file_name
     ? folderOfKey(state.current.file_name)
     : saveFolderForNewNote();
   try {
-    const meta = await invoke('save_note', { fileName: state.current.file_name || '', title, tags, content, folder });
+    const meta = await invoke('save_note', { fileName: state.current.file_name || '', title, tags, content, folder, kind: state.kind });
     state.current = meta;
+    // 落盘后类型锁定：扩展名已定，强度上不允许再切
+    if (!state.kindLocked) {
+      applyKind(meta.kind || state.kind, true);
+    }
     // 落点已消费：清掉显式指定，避免影响下一次新建
     state.pendingNewFolder = null;
     state.dirty = false;
@@ -367,8 +671,11 @@ async function doSave() {
   } catch (e) {
     const msg = String(e);
     if (msg.includes('未配置') || msg.includes('NotFound')) {
-      saveError = '笔记文件夹不可用，请在顶栏更换文件夹';
-      setStatus(saveError + '（保存失败）', 'error');
+      // 笔记库位置在启动时确定（exe 同级 notes，不可写则退到用户配置目录），
+      // 应用内没有换库入口，所以这里只如实报出目录与原因，不提示做不到的操作。
+      const vault = state.config && state.config.vault_dir ? state.config.vault_dir : '笔记文件夹';
+      saveError = `笔记文件夹不可用：${vault}`;
+      setStatus(saveError + '（请检查该目录是否存在且有写入权限）', 'error');
     } else {
       saveError = '保存失败：' + msg;
       setStatus(saveError, 'error');
@@ -489,6 +796,13 @@ function buildNoteItem(n, q) {
   const nt = document.createElement('div');
   nt.className = 'nt';
   highlightText(nt, n.title, q);
+  // 富文本笔记加一个类型徽标，列表里一眼能区分两种文档
+  if (n.kind === 'rich') {
+    const badge = document.createElement('span');
+    badge.className = 'nt-kind';
+    badge.textContent = '富文本';
+    nt.appendChild(badge);
+  }
   const nm = document.createElement('div');
   nm.className = 'nm';
   nm.textContent = (n.modified || '').replace('T', ' ');
@@ -718,6 +1032,15 @@ async function refreshList() {
   // 落点与 doSave 保持一致，这样占位行会出现在它将来真正所属的文件夹里。
   const draftFolder = state.current && !state.current.file_name ? saveFolderForNewNote() : null;
   const draftItem = draftFolder !== null ? buildDraftItem($('doc-title').value, draftFolder) : null;
+  // 搜索/筛选无命中：即便有文件夹也不该只显示一排空文件夹，那看起来像笔记全丢了
+  if (!state.notes.length && (q || state.folderFilter !== null)) {
+    const li = document.createElement('li');
+    li.className = 'empty';
+    li.textContent = q ? '没有匹配的笔记' : '该文件夹里还没有笔记';
+    if (draftItem) ul.appendChild(draftItem);
+    ul.appendChild(li);
+    return;
+  }
   if (!state.notes.length && !folderNames.length) {
     if (draftItem) ul.appendChild(draftItem);
     else {
@@ -832,27 +1155,42 @@ function startInlineRename(li, n) {
 async function deleteNoteFlow(n) {
   const ok = await invoke('confirm_dialog', {
     title: '确认删除',
-    message: `确定删除「${n.title}」？将移入系统回收站，可从回收站恢复。`,
+    message: `确定删除「${n.title}」？文件会移入 Windows 回收站，需要找回时在回收站里还原。`,
     okLabel: '删除',
     cancelLabel: '取消',
   });
   if (!ok) return;
   try {
-    await invoke('delete_note', { fileName: n.file_name });
+    const recycled = await invoke('delete_note', { fileName: n.file_name });
     if (state.current && state.current.file_name === n.file_name) {
+      // 删掉正在编辑的笔记后回到「没有打开的笔记」：列表给空态，编辑区清空。
+      // 之后只要开始输入，beginDraft() 会把它变成一个可自动保存的新草稿——
+      // 不能停在「有编辑区但没有 current」的状态，那样敲的字只进内存、永不落盘。
       state.current = null;
       $('title-input').value = '';
       $('doc-title').value = '';
       $('tags-input').value = '';
       $('editor').value = '';
+      if (state.rich) {
+        state.richAssets.clear();
+        state.rich.setContents([], 'silent');
+        state.rich.history.clear();
+      }
       $('header-path').hidden = true;
       $('header-path').textContent = '';
+      applyKind('md', false);
       renderHighlight();
       render('');
+      renderRichWordCount();
+      renderPreviewEmptyState(true);
+      if (!$('find-bar').hidden) closeFindBar();
       state.dirty = false;
       document.title = 'MarkVault';
     }
-    setStatus('已删除', 'ok');
+    // 后端在回收站不可用时（网络盘、非 Windows）会退回永久删除。
+    // 确认框承诺过「可从回收站恢复」，这里必须如实纠正，否则用户以为还能找回。
+    if (recycled === false) setStatus('已删除（回收站不可用，已永久删除，无法找回）', 'error');
+    else setStatus('已删除，可从系统回收站恢复', 'ok');
   } catch (e) {
     setStatus('删除失败：' + e, 'error');
   }
@@ -1228,10 +1566,29 @@ async function deleteFolderFlow(name) {
 }
 
 /* 轻量文本输入弹窗：WebView2 无 window.prompt，复用 link-modal 的样式约定 */
+/* 把焦点限制在弹窗内。
+   弹窗是 hidden 切换的普通 div，没有原生 focus trap：连按 Tab 会跑到页面上
+   其它控件上，弹窗看起来还开着，用户的按键却打在了别处。 */
+const trappedModals = new WeakSet();
+function trapFocus(modal) {
+  if (trappedModals.has(modal)) return;
+  trappedModals.add(modal);
+  const sel = 'button, input, select, textarea, [tabindex]:not([tabindex="-1"])';
+  modal.addEventListener('keydown', e => {
+    if (e.key !== 'Tab') return;
+    const items = [...modal.querySelectorAll(sel)].filter(el => !el.disabled && el.offsetParent !== null);
+    if (!items.length) return;
+    const first = items[0], last = items[items.length - 1];
+    if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+    else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+  });
+}
+
 function promptInline(title, initial) {
   return new Promise(resolve => {
     const modal = $('prompt-modal');
     modal.hidden = false;
+    trapFocus(modal);
     modal.querySelector('.link-modal-title').textContent = title;
     const input = $('prompt-input');
     input.value = initial || '';
@@ -1255,8 +1612,10 @@ function promptInline(title, initial) {
     $('prompt-cancel').onclick = () => done(false);
     input.onkeydown = e => {
       e.stopPropagation();
-      if (e.key === 'Enter') done(true);
-      if (e.key === 'Escape') done(false);
+      // 必须 preventDefault：done() 会把焦点交回编辑器，Enter 的默认行为随后作用在
+      // textarea 上，往里插一个换行——用户看到的是插入内容后面多出一行空白。
+      if (e.key === 'Enter') { e.preventDefault(); done(true); }
+      if (e.key === 'Escape') { e.preventDefault(); done(false); }
     };
   });
 }
@@ -1364,11 +1723,24 @@ async function openNote(fileName) {
   $('title-input').value = note.title;
   $('doc-title').value = note.title;
   $('tags-input').value = (note.tags || []).join(', ');
-  $('editor').value = note.content;
-  renderHighlight();
-  render(note.content);
+  // 类型由后端按扩展名推出；打开已有笔记时一律锁定
+  if (note.kind === 'rich') {
+    applyKind('rich', true);
+    richLoadHtml(note.content);
+  } else {
+    applyKind('md', true);
+    $('editor').value = note.content;
+    renderHighlight();
+    render(note.content);
+  }
   updateHeaderPath(note);
   state.dirty = false;
+  // 换了正文：滚动位置按这篇笔记上次读到的地方恢复（没有记录就是文首）。
+  // 不按笔记记的话，上一篇的 scrollTop 会直接落到新笔记上，看到的是文中一段而不是开头。
+  $('editor-scroll').scrollTop = 0;
+  if (state.rich) { const sc = document.querySelector('#rich-editor .ql-editor'); if (sc) sc.scrollTop = 0; }
+  else restoreScrollPos();
+  if (!$('find-bar').hidden) { findIdx = -1; runFind(); }
   LS.set('last_open', fileName);
   document.title = (note.title === '无标题' ? '未命名文档' : note.title) + ' - MarkVault';
   // 保存失败的错误态优先级高于"就绪"，不能被打开笔记的动作抹掉
@@ -1386,11 +1758,22 @@ async function newNote() {
   $('title-input').value = '';
   $('doc-title').value = '';
   $('tags-input').value = '';
-  $('editor').value = '';
+  // 新笔记：类型可自由选择，默认沿用上次选择（首次为 Markdown）
+  applyKind(LS.get('kind', 'md'), false);
+  if (isRich()) {
+    ensureQuill().setContents([], 'silent');
+    // 必须清撤销栈：setContents 只是换内容，历史还在。不清的话新笔记里按 Ctrl+Z
+    // 会把上一篇的正文整段复活，2 秒后自动保存又把它写成一个新的 .html 文件。
+    state.rich.history.clear();
+    state.richAssets.clear();
+    renderRichWordCount();
+  } else {
+    $('editor').value = '';
+    renderHighlight();
+    render('');
+  }
   $('header-path').hidden = true;
   $('header-path').textContent = '';
-  renderHighlight();
-  render('');
   state.dirty = false;
   document.title = '未命名文档 - MarkVault';
   // 明确告知新笔记会落到哪，避免用户以为"点了新建却什么都没发生"；
@@ -1402,9 +1785,10 @@ async function newNote() {
 }
 
 /* ---------- 视图模式 ---------- */
-function setLayout(mode) {
+function setLayout(mode, persist) {
   state.layout = mode;
-  LS.set('layout', mode);
+  // persist=false 用于富文本模式强制单栏：不覆盖用户原来的布局偏好
+  if (persist !== false) LS.set('layout', mode);
   const shell = $('main-shell');
   shell.classList.remove('layout-both', 'layout-edit', 'layout-preview');
   shell.classList.add('layout-' + mode);
@@ -1421,17 +1805,32 @@ function setLayout(mode) {
   let dragging = false;
   const saved = parseFloat(LS.get('editorWidth', ''));
   const applyWidth = w => { main.querySelector('.editor-block').style.flex = `0 0 ${w}px`; };
+  // 预览区有自己的 min-width（320px），编辑区宽度上限必须把这段和两侧 gap 扣掉，
+  // 否则拉到最右时预览被挤出 main 之外，右侧内容直接被裁掉看不见。
+  const maxFor = () => {
+    const rect = main.getBoundingClientRect();
+    const gap = parseFloat(getComputedStyle(main).columnGap) || 0;
+    const resizerW = resizer.getBoundingClientRect().width || 0;
+    // main 的三个子元素之间有两个 gap，先扣掉它们再扣预览自己的 320px，否则会多出几像素
+    return Math.max(240, rect.width - 320 - gap * 2 - resizerW);
+  };
   // 恢复上次宽度：受窗口宽度约束，避免从小窗口拖出的窄宽在大窗口上原样还原
   if (saved > 0) {
     const rect = main.getBoundingClientRect();
-    if (rect.width) applyWidth(Math.min(Math.max(saved, 240), rect.width - 320));
+    if (rect.width) applyWidth(Math.min(Math.max(saved, 240), maxFor()));
   }
   resizer.addEventListener('mousedown', e => { dragging = true; resizer.classList.add('dragging'); document.body.classList.add('resizing'); e.preventDefault(); });
   window.addEventListener('mousemove', e => {
     if (!dragging) return;
     const rect = main.getBoundingClientRect();
-    const w = Math.min(Math.max(e.clientX - rect.left, 240), rect.width - 320);
+    const w = Math.min(Math.max(e.clientX - rect.left, 240), maxFor());
     applyWidth(w);
+  });
+  // 窗口变窄后原先记住的像素宽度会重新把预览挤出去，按当前宽度重新夹一次
+  window.addEventListener('resize', () => {
+    const ed = main.querySelector('.editor-block');
+    const cur = ed.getBoundingClientRect().width;
+    if (cur > maxFor()) applyWidth(maxFor());
   });
   window.addEventListener('mouseup', () => {
     if (!dragging) return;
@@ -1591,10 +1990,11 @@ function maskInlineCode(line) {
   return out;
 }
 
-/* 同行内找包围选区的一对定界符（跳过行内 code，`**` 非重叠扫描） */
-function findEnclosingDelimPair(line, selStart, selEnd, delim) {
+/* 同行内找包围选区的一对定界符（跳过行内 code，`**` 非重叠扫描）。
+   raw=true 时不做行内 code 屏蔽——反引号自身就是目标定界符，屏蔽掉就永远找不到。 */
+function findEnclosingDelimPair(line, selStart, selEnd, delim, raw) {
   const len = delim.length;
-  const masked = maskInlineCode(line);
+  const masked = raw ? line : maskInlineCode(line);
   const positions = [];
   for (let i = 0; i <= masked.length - len; i++) {
     if (masked.slice(i, i + len) === delim) { positions.push(i); i += len - 1; }
@@ -1609,7 +2009,7 @@ function findEnclosingDelimPair(line, selStart, selEnd, delim) {
 }
 
 /* 取消行内定界标记：已包住选区 / 紧邻选区外侧 / 同行内包围选区时剥掉一层 */
-function resolveDelimUnwrapRange(text, start, end, delim) {
+function resolveDelimUnwrapRange(text, start, end, delim, raw) {
   const len = delim.length;
   if (len < 1) return null;
   if (end - start >= len * 2) {
@@ -1628,7 +2028,7 @@ function resolveDelimUnwrapRange(text, start, end, delim) {
   if (lineEnd === -1) lineEnd = text.length;
   if (start < lineStart || end > lineEnd) return null;
   const line = text.slice(lineStart, lineEnd);
-  const pair = findEnclosingDelimPair(line, start - lineStart, end - lineStart, delim);
+  const pair = findEnclosingDelimPair(line, start - lineStart, end - lineStart, delim, raw);
   if (!pair) return null;
   return { oS: lineStart + pair.open, oE: lineStart + pair.closeEnd, cS: lineStart + pair.contentStart, cE: lineStart + pair.contentEnd };
 }
@@ -1675,7 +2075,17 @@ function formatUnderline() {
 function formatStrike() {
   if (!toggleDelimitedInline(['~~'])) wrapSel('~~', '~~', '删除线', /^~+$/);
 }
+/* 行内代码：开关语义。普通 toggleDelimitedInline 会先 maskInlineCode 把 `code` 区域涂成空格，
+   反引号自身就被涂掉、永远找不到定界符，所以这里直接扫反引号。 */
 function formatInlineCode() {
+  const ta = $('editor');
+  const text = ta.value, start = ta.selectionStart, end = ta.selectionEnd;
+  const r = resolveDelimUnwrapRange(text, start, end, '`', true);
+  if (r) {
+    const inner = text.slice(r.cS, r.cE);
+    applyEdit(r.oS, r.oE, inner, r.oS, r.oS + inner.length);
+    return;
+  }
   wrapSel('`', '`', '代码', /^`+$/);
 }
 
@@ -1685,6 +2095,9 @@ function formatInlineCode() {
 function expandToLines(s, e) {
   const v = $('editor').value;
   const lineStart = v.lastIndexOf('\n', s - 1) + 1;
+  // 选区正好停在下一行行首（末字符是换行）时，那一行并没有被选中，不该算进本次操作：
+  // 否则「选到 bbb 末尾」会把 ccc 也一起加上前缀。
+  if (e > lineStart && v[e - 1] === '\n') return [lineStart, e - 1];
   const nl = v.indexOf('\n', e);
   return [lineStart, nl === -1 ? v.length : nl];
 }
@@ -1793,8 +2206,19 @@ function insertHeading(level) {
   let lineEnd = v.indexOf('\n', lineStart);
   if (lineEnd === -1) lineEnd = v.length;
   const cur = v.slice(lineStart, lineEnd);
+  // 围栏内的行是代码，加 '#' 只会变成代码内容里的一行井号，预览不会出标题
+  if (inFenceAt(v, s)) { setStatus('代码块内不能插入标题', 'error'); ta.focus(); return; }
   const out = '#'.repeat(level) + ' ' + cur.replace(/^#{0,6}\s*/, '');
   applyEdit(lineStart, lineEnd, out, lineStart + out.length, lineStart + out.length);
+}
+
+/* 判断 position 是否落在 ``` 围栏内部（含围栏行本身） */
+function inFenceAt(v, position) {
+  let open = false;
+  for (const line of v.slice(0, position).split('\n')) {
+    if (/^\s*```/.test(line)) open = !open;
+  }
+  return open || /^\s*```/.test(v.slice(v.lastIndexOf('\n', position - 1) + 1));
 }
 
 /* 代码块：选中内容包进 ``` 围栏，无选区时用占位，插入后全选。
@@ -1825,6 +2249,7 @@ function openLinkPrompt(cb) {
   const modal = $('link-modal');
   const input = $('link-url');
   modal.hidden = false;
+  trapFocus(modal);
   input.value = 'https://';
   input.focus();
   input.select();
@@ -1846,8 +2271,9 @@ function openLinkPrompt(cb) {
   $('link-ok').onclick = () => done(true);
   $('link-cancel').onclick = () => done(false);
   input.onkeydown = e => {
-    if (e.key === 'Enter') done(true);
-    else if (e.key === 'Escape') done(false);
+    // 同 promptInline：不拦住默认行为，Enter 会在交回焦点的编辑器里插入换行
+    if (e.key === 'Enter') { e.preventDefault(); done(true); }
+    else if (e.key === 'Escape') { e.preventDefault(); done(false); }
   };
 }
 
@@ -2051,7 +2477,18 @@ let previewTimer = null, hlRaf = 0;
 /* 每次渲染挂序号：120ms 防抖期间用户又删/打了字，晚触发的回调必须以最新正文为准。
    旧回调迟到时丢弃，否则预览显示的是中间态，和编辑区对不上（用户报的"删的内容预览不对"）。 */
 let renderSeq = 0;
+/* 没有打开的笔记却开始输入时，升级成新草稿。
+   删掉当前笔记、或上次打开的笔记已被外部删除，都会留下这种空档；
+   不升级的话 doSave 见 state.current 为空直接返回成功，输入内容永远不会落盘。 */
+function beginDraft() {
+  if (state.current) return;
+  state.current = { file_name: '' };
+  LS.set('last_open', '');
+  renderPreviewEmptyState(false);
+}
+
 function onEditorInput() {
+  beginDraft();
   if (!hlRaf) {
     hlRaf = requestAnimationFrame(() => { hlRaf = 0; renderHighlight(); });
   }
@@ -2061,6 +2498,8 @@ function onEditorInput() {
     if (seq !== renderSeq) return; // 期间又有输入，本次已过期
     render($('editor').value);
   }, 120);
+  // 正文变了，查找命中点全部失效：不重跑就会按旧位置选中，跳过去选中的是一段无关文字
+  if (!$('find-bar').hidden) { findIdx = -1; runFind(); }
   scheduleAutosave();
 }
 
@@ -2076,7 +2515,7 @@ async function exportNote(format) {
   if (format === 'html') {
     payload = buildStandaloneHtml();
   } else if (format === 'docx') {
-    payload = buildDocxPayload($('editor').value);
+    payload = isRich() ? buildDocxPayloadFromHtml() : buildDocxPayload($('editor').value);
   } else if (format === 'md') {
     payload = $('editor').value;
   } else if (format === 'png') {
@@ -2125,6 +2564,57 @@ function showToast(text, action) {
   toastTimer = setTimeout(() => el.classList.remove('show'), 6000);
 }
 
+/* 富文本导出用的 HTML：图片换成 data URL（导出的文件要能独立打开），并去掉编辑器私有标记。
+   同样全程字符串替换：把相对路径写进 DOM 会触发真实请求。 */
+function richHtmlForExport() {
+  if (!state.rich) return '';
+  const clone = state.rich.root.cloneNode(true);
+  clone.querySelectorAll('[contenteditable]').forEach(el => el.removeAttribute('contenteditable'));
+  clone.querySelectorAll('.ql-ui').forEach(el => el.remove());
+  let html = clone.innerHTML;
+  // data URL 已经在 DOM 里，无需替换；仅补齐载入时未解析的资产
+  for (const [rel, url] of state.richAssets) {
+    if (!url) continue;
+    html = html.split('src="' + rel + '"').join('src="' + url + '"');
+  }
+  return html;
+}
+
+/* 富文本 → DOCX 段落数组。只映射 md/docx 都能表达的结构，其余按段落降级。 */
+function buildDocxPayloadFromHtml() {
+  const out = [];
+  if (!state.rich) return JSON.stringify(out);
+  const walk = node => {
+    for (const el of node.children) {
+      const tag = el.tagName.toLowerCase();
+      if (/^h[1-6]$/.test(tag)) {
+        out.push({ block: 'heading', level: +tag.slice(1), text: el.textContent.trim() });
+      } else if (tag === 'blockquote') {
+        const t = el.textContent.trim();
+        if (t) out.push({ block: 'quote', text: t });
+      } else if (tag === 'pre') {
+        out.push({ block: 'code', text: el.textContent });
+      } else if (tag === 'ul' || tag === 'ol') {
+        [...el.children].forEach(li => {
+          if (li.tagName.toLowerCase() !== 'li') return;
+          // 嵌套列表压平成同级项，Word 侧不建多级结构
+          const own = [...li.childNodes].filter(n => n.nodeType === 3 || (n.nodeType === 1 && !/^(ul|ol)$/i.test(n.tagName)));
+          const text = own.map(n => n.textContent).join('').trim();
+          if (text) out.push({ block: 'list', text: tag === 'ol' ? `${[...el.children].indexOf(li) + 1}. ${text}` : text });
+        });
+      } else if (tag === 'p') {
+        const t = el.textContent.trim();
+        if (t) out.push({ block: 'paragraph', text: t });
+        // 段落里理论上不嵌块级元素，这里不再递归
+      } else {
+        walk(el);
+      }
+    }
+  };
+  walk(state.rich.root);
+  return JSON.stringify(out);
+}
+
 /* DOCX 载荷：把 Markdown 逐行解析成结构化段落（heading / paragraph / list / code / quote），
    Rust 端据此生成真正的 OOXML，而不是把 HTML 改个扩展名。 */
 function buildDocxPayload(md) {
@@ -2161,7 +2651,14 @@ function buildDocxPayload(md) {
   return JSON.stringify(out);
 }
 
-function buildStandaloneHtml() {  const body = $('preview').innerHTML;
+function buildStandaloneHtml() {
+  // 富文本笔记：Quill 的输出本身就是成品 HTML，补上样式与标题即可
+  if (isRich()) {
+    const escHtml = s => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const body = richHtmlForExport();
+    return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${escHtml(state.current.title || '')}</title><style>body{max-width:800px;margin:40px auto;font-family:sans-serif;line-height:1.8;color:#1a1d23;} h1{font-size:2em;} h2{border-bottom:1px solid #eee;padding-bottom:6px;} blockquote{border-left:4px solid #6C5CE7;background:rgba(108,92,231,.07);margin:12px 0;padding:12px 16px;} pre{background:#f4f4f4;padding:12px;border-radius:6px;overflow-x:auto;} img{max-width:100%;} ol,ul{padding-left:1.6em;} u{text-decoration:underline;text-underline-offset:3px;}</style></head><body>${body}</body></html>`;
+  }
+  const body = $('preview').innerHTML;
   const escHtml = s => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${escHtml(state.current.title || '')}</title><style>body{max-width:800px;margin:40px auto;font-family:sans-serif;line-height:1.8;color:#1a1d23;} pre{background:#1a1d27;color:#d7dbea;padding:16px;border-radius:10px;} code{background:rgba(163,21,21,.08);padding:2px 5px;border-radius:4px;} pre code{background:transparent;padding:0;} blockquote{border-left:4px solid #6C5CE7;background:rgba(108,92,231,.07);margin:12px 0;padding:12px 16px;} table{border-collapse:collapse;width:100%;} th,td{border:1px solid #ddd;padding:8px 12px;} th{background:#f3f5f8;} img{max-width:100%;} h1{font-size:2em;} h2{border-bottom:1px solid #eee;padding-bottom:6px;} ul.task-list{list-style:none;padding-left:.4em;} li.task-item{list-style:none;} li.task-item input[type="checkbox"]{appearance:none;-webkit-appearance:none;width:15px;height:15px;border:1.5px solid #9a948c;border-radius:4px;vertical-align:-2px;margin-right:6px;position:relative;} li.task-item input[type="checkbox"]:checked{background:#6C5CE7;border-color:#6C5CE7;} li.task-item input[type="checkbox"]:checked::after{content:'';position:absolute;left:4px;top:1px;width:4px;height:8px;border:solid #fff;border-width:0 2px 2px 0;transform:rotate(45deg);} ol.ol-circle{list-style:none;counter-reset:ol-circle;padding-left:0;} ol.ol-circle>li{counter-increment:ol-circle;position:relative;padding-left:30px;margin:6px 0;} ol.ol-circle>li::before{content:counter(ol-circle);position:absolute;left:0;top:.2em;width:20px;height:20px;border-radius:50%;background:#6C5CE7;color:#fff;font-size:12px;display:inline-flex;align-items:center;justify-content:center;} .badge{display:inline-block;padding:2px 10px;border-radius:999px;font-size:12px;font-weight:600;} .badge.tone-accent{background:rgba(108,92,231,.12);color:#6C5CE7;} .badge.tone-green{background:rgba(46,184,114,.14);color:#1f9d63;} .badge.tone-yellow{background:rgba(240,180,40,.16);color:#b07d10;} .badge.tone-dark{background:rgba(30,34,44,.88);color:#fff;} u{text-decoration:underline;text-underline-offset:3px;}</style></head><body>${body}</body></html>`;
 }
@@ -2274,6 +2771,50 @@ bindMenu('prow-view', 'view-menu-prow');
 bindMenu('btn-heading', 'heading-menu');
 document.querySelectorAll('#export-menu .dropdown-item').forEach(el => el.onclick = () => { closeAllMenus(); exportNote(el.dataset.fmt); });
 document.querySelectorAll('#view-menu-row .dropdown-item, #view-menu-prow .dropdown-item').forEach(el => el.onclick = () => { closeAllMenus(); setLayout(el.dataset.view); });
+
+/* 文档类型开关：仅新笔记、尚未落盘时可切换 */
+$('kind-switch').querySelectorAll('button').forEach(btn => {
+  btn.onclick = () => {
+    if (state.kindLocked) {
+      setStatus('文档类型创建后不可更改，如需另一种类型请新建文档', 'error');
+      return;
+    }
+    const next = btn.dataset.kind;
+    if (next === state.kind) return;
+    // 切类型会丢当前正文（两种格式无法无损互转），先确认
+    const hasBody = isRich() ? (state.rich && state.rich.getText().trim()) : $('editor').value.trim();
+    const go = () => {
+      LS.set('kind', next);
+      if (next === 'rich') {
+        $('editor').value = '';
+        render('');
+        applyKind('rich', false);
+        state.rich && state.rich.setContents([], 'silent');
+        // 同上：切类型后撤销栈里是另一种格式的内容，按 Ctrl+Z 会把它搬回来
+        state.rich && state.rich.history.clear();
+        state.rich && state.rich.focus();
+      } else {
+        state.richAssets.clear();
+        state.rich && state.rich.setContents([], 'silent');
+        state.rich && state.rich.history.clear();
+        $('editor').value = '';
+        applyKind('md', false);
+        renderHighlight();
+        render('');
+        $('editor').focus();
+      }
+      state.dirty = false;
+      setStatus('已切换为' + (next === 'rich' ? '富文本' : 'Markdown') + '，输入即自动保存', 'ok');
+    };
+    if (!hasBody) { go(); return; }
+    invoke('confirm_dialog', {
+      title: '切换文档类型',
+      message: '切换会清空当前正文，两种格式无法互转。继续？',
+      okLabel: '继续',
+      cancelLabel: '取消',
+    }).then(ok => { if (ok) go(); });
+  };
+});
 document.querySelectorAll('#heading-menu .dropdown-item').forEach(el => el.onclick = () => { closeAllMenus(); insertHeading(+el.dataset.h); });
 
 $('btn-bold').onclick = formatBold;
@@ -2315,8 +2856,51 @@ listen('close-requested', async () => {
 }).catch(() => { });
 
 /* ---------- 快捷键 ---------- */
+/* 弹窗打开时，全局快捷键必须让路：否则在链接/表格弹窗里按 Ctrl+B，
+   格式会施加到背后编辑器里的旧选区上，用户看着弹窗却改了正文。 */
+function anyModalOpen() {
+  return ['link-modal', 'prompt-modal'].some(id => { const el = $(id); return el && !el.hidden; });
+}
+/* 焦点在普通输入框里时，Ctrl+B/I/K/N 这类编辑命令不该抢焦点去编辑器 */
+function typingInField() {
+  const el = document.activeElement;
+  if (!el || el === $('editor') || el.id === 'rich-editor') return false;
+  return el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable;
+}
+
 document.addEventListener('keydown', e => {
   const ctrl = e.ctrlKey || e.metaKey;
+  const key = e.key.toLowerCase();
+  if (anyModalOpen()) {
+    // Esc 由各弹窗自己的监听器处理；其余快捷键一律不响应
+    if (e.key !== 'Escape') return;
+    return;
+  }
+  if (typingInField()) {
+    // 输入框里只放行不改动正文的全局命令。Ctrl+B/I/K/N 这类会抢焦点或改正文的
+    // 一律让给输入框本身——否则在标签框里按 Ctrl+B 会把加粗打到背后编辑器的旧选区上。
+    if (ctrl && key === 's') { e.preventDefault(); doSave(); }
+    else if (ctrl && key === 'f') { e.preventDefault(); openFindBar(); }
+    else if (ctrl && key === 'h') { e.preventDefault(); openFindBar(); $('replace-input').focus(); }
+    else if (ctrl && e.shiftKey && key === 't') { e.preventDefault(); applyTheme(document.body.dataset.theme === 'dark' ? 'light' : 'dark'); }
+    else if (ctrl && e.shiftKey && key === 'l') { e.preventDefault(); cycleLayout(); }
+    else if (e.key === 'Escape' && !$('find-bar').hidden) { e.preventDefault(); closeFindBar(); }
+    return;
+  }
+  // 富文本模式：格式快捷键交给 Quill 自己的键盘绑定，这里只保留保存/新建/主题/布局
+  if (isRich()) {
+    if (ctrl && e.key.toLowerCase() === 's') { e.preventDefault(); doSave(); }
+    else if (ctrl && e.key.toLowerCase() === 'n') { e.preventDefault(); newNoteDefault(); }
+    else if (ctrl && e.shiftKey && e.key.toLowerCase() === 't') { e.preventDefault(); applyTheme(document.body.dataset.theme === 'dark' ? 'light' : 'dark'); }
+    // 富文本模式没有源码文本，查找栏无从定位：明说比静默失效好
+    else if (ctrl && (e.key.toLowerCase() === 'f' || e.key.toLowerCase() === 'h')) {
+      e.preventDefault();
+      setStatus('富文本模式不支持查找，切到 Markdown 文档可用', 'error');
+    }
+    else if (e.key === 'F6') { e.preventDefault(); applySidebar(!state.sidebarOpen); }
+    else if (e.key === 'Escape') closeAllMenus();
+    return;
+  }
   if (ctrl && e.key.toLowerCase() === 's') { e.preventDefault(); doSave(); }
   else if (ctrl && e.key.toLowerCase() === 'b') { e.preventDefault(); focusEditorThen(formatBold); }
   else if (ctrl && e.key.toLowerCase() === 'i') { e.preventDefault(); focusEditorThen(formatItalic); }
@@ -2328,8 +2912,9 @@ document.addEventListener('keydown', e => {
   else if (ctrl && e.key.toLowerCase() === 'f') { e.preventDefault(); openFindBar(); }
   // Ctrl+H：打开查找栏并聚焦替换输入框
   else if (ctrl && e.key.toLowerCase() === 'h') { e.preventDefault(); openFindBar(); $('replace-input').focus(); }
-  // 查找跳转后会聚焦编辑器（让命中可见），此时 Enter 应继续跳到下一个而非插入换行
-  else if (e.key === 'Enter' && !$('find-bar').hidden && e.target === $('editor')) {
+  // 查找跳转后会聚焦编辑器（让命中可见），此时 Enter 应继续跳到下一个而非插入换行。
+  // 无命中时必须放行：否则用户在"无结果"状态下连换行都打不出来。
+  else if (e.key === 'Enter' && !$('find-bar').hidden && findHits.length && e.target === $('editor')) {
     e.preventDefault();
     findIdx += e.shiftKey ? -1 : 1;
     gotoFindHit(true);
@@ -2510,12 +3095,15 @@ $('replace-all').onclick = replaceAll;
 $('replace-input').addEventListener('keydown', e => {
   e.stopPropagation();
   if (e.key === 'Enter') { e.preventDefault(); replaceCurrent(); }
+  // 全局 Esc 处理被 stopPropagation 挡住了，这里必须自己收尾，否则查找栏关不掉
+  else if (e.key === 'Escape') { e.preventDefault(); closeFindBar(); }
 });
 $('replace-input').addEventListener('input', e => e.stopPropagation());
 
 /* ---------- 编辑器 Tab 缩进 ----------
    正文里 Tab 用于缩进，为免纯键盘被困在 textarea：Ctrl+Tab 移出焦点。 */
 $('editor').addEventListener('keydown', e => {
+  if (isRich()) return; // 富文本模式的键盘行为交给 Quill
   if (e.key === 'Tab' && (e.ctrlKey || e.metaKey)) {
     e.preventDefault();
     // 按 DOM 顺序走到编辑器之后的下一个可聚焦控件
@@ -2548,14 +3136,17 @@ $('editor').addEventListener('keydown', e => {
     }).join('\n');
     applyEdit(lineStart, lineEnd, out, Math.max(lineStart, s - removedFirst), Math.max(lineStart, en - delta));
   } else {
-    // Tab：有选区时整块缩进，无选区插入两个空格
-    if (s !== en && v.slice(s, en).includes('\n')) {
-      const lineStart = v.lastIndexOf('\n', s - 1) + 1;
+    // Tab 一律是「加缩进」，不能拿两个空格替换掉选区——那等于删掉用户选中的文字。
+    // 跨行选区逐行在行首加；单行选区只在行首加、选区跟着右移 2；无选区则插入两个空格。
+    const lineStart = v.lastIndexOf('\n', s - 1) + 1;
+    if (v.slice(s, en).includes('\n')) {
       let lineEnd = v.indexOf('\n', en);
       if (lineEnd === -1) lineEnd = v.length;
       const lines = v.slice(lineStart, lineEnd).split('\n');
       const out = lines.map(l => '  ' + l).join('\n');
       applyEdit(lineStart, lineEnd, out, s + 2, en + lines.length * 2);
+    } else if (s !== en) {
+      applyEdit(lineStart, lineStart, '  ', s + 2, en + 2);
     } else {
       applyEdit(s, en, '  ', s + 2, s + 2);
     }
@@ -2565,6 +3156,8 @@ $('editor').addEventListener('keydown', e => {
 /* ---------- 恢复界面状态 ---------- */
 applyTheme(LS.get('theme', 'light'));
 setLayout(LS.get('layout', 'both'));
+// 初始界面固定为 Markdown 空文档；「上次选择的类型」只在新建文档时生效（见 newNote）
+applyKind('md', false);
 function applySidebar(open) {
   state.sidebarOpen = open;
   LS.set('sidebar', open ? '1' : '0');

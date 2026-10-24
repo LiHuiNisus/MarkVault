@@ -45,22 +45,26 @@ pub fn save_config(cfg: &AppConfig) -> Result<(), String> {
 }
 
 /// 同秒/同名冲突时追加 -2、-3…（与 commands::dedup_name 同规则，迁移时不想跨模块依赖）。
+/// 扩展名原样保留：富文本笔记是 .html，不能被改回 .md。
 fn dedup_path(dir: &Path, name: &str) -> PathBuf {
     let first = dir.join(name);
     if !first.exists() {
         return first;
     }
-    let stem = name.trim_end_matches(".md");
+    let (stem, ext) = match name.rsplit_once('.') {
+        Some((s, e)) if !e.is_empty() && e.len() <= 8 => (s, format!(".{}", e)),
+        _ => (name, ".md".to_string()),
+    };
     for n in 2..10000 {
-        let candidate = dir.join(format!("{}-{}.md", stem, n));
+        let candidate = dir.join(format!("{}-{}{}", stem, n, ext));
         if !candidate.exists() {
             return candidate;
         }
     }
-    dir.join(format!("{}-{}.md", stem, chrono::Utc::now().timestamp_millis()))
+    dir.join(format!("{}-{}{}", stem, chrono::Utc::now().timestamp_millis(), ext))
 }
 
-/// 把 src 下所有 .md 移到 dst（重名自动改名）。src 不存在或与 dst 相同则什么都不做；
+/// 把 src 下所有 Markdown / 富文本笔记移到 dst（重名自动改名）。src 不存在或与 dst 相同则什么都不做；
 /// 原目录整体保留，不做删除。
 fn migrate_notes(src: &Path, dst: &Path) -> Result<(), String> {
     if src == dst || !src.is_dir() {
@@ -70,7 +74,12 @@ fn migrate_notes(src: &Path, dst: &Path) -> Result<(), String> {
     let entries = std::fs::read_dir(src).map_err(|e| e.to_string())?;
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+        let is_note = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| matches!(e.to_ascii_lowercase().as_str(), "md" | "markdown" | "html" | "htm"))
+            .unwrap_or(false);
+        if !is_note {
             continue;
         }
         let name = match path.file_name().map(|n| n.to_string_lossy().to_string()) {
