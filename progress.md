@@ -1,5 +1,30 @@
 # 当前进度
 
+## 2026-10-24 安装 0.1.3
+
+用 `MarkVault_0.1.3_x64-setup.exe /S` 静默安装到 `D:\MarkVault`（覆盖 0.1.2 的安装产物）。
+
+- 注册表 `HKCU\...\Uninstall\MarkVault` 的 `DisplayVersion` 已是 `0.1.3`，`InstallLocation` 为 `D:\MarkVault`，
+  `uninstall.exe` 已更新。
+- 安装后的 `app.exe` md5 是 `41da47ce`，与 `target/release/app.exe`（`73805488`）不同——
+  NSIS 安装时会往 exe 里写入 bundle 类型信息，这是预期行为，不是装错版本
+  （`VersionInfo` 的 `FileVersion` / `ProductVersion` 均为 `0.1.3`）。**因此不能用 md5 判断安装是否成功，改看版本信息。**
+- 旧 identifier 的 `%LOCALAPPDATA%\net.markvault.app`（81M WebView2 缓存）已按确认删除；
+  新目录 `net.markvault.desktop` 里的 Local Storage 完整，主题/布局/上次打开都在。
+
+### 安装后实测
+
+CDP 连真机：22 篇笔记、上次打开的富文本笔记自动载入、`kind=rich` 已锁定、
+运行中的 `doSave` 源码含新文案、控制台无报错。
+
+### 坑
+
+- 静默安装从 Git Bash 直接 `./MarkVault_0.1.3_x64-setup.exe /S` 可以；
+  用 `cmd //c "\"路径\" /S"` 会因引号转义失败，报「不是内部或外部命令」。
+- 强杀 app 会留下孤儿 `msedgewebview2.exe` 进程；这些进程占着 profile 锁时再启动，
+  新实例约 3 秒后以 exit code 0 自行退出（无任何报错、事件日志无记录）。
+  清理办法：`taskkill //IM msedgewebview2.exe //F` 后再启动即正常。
+
 ## 2026-10-24 收尾：版本升 0.1.3、修失效文案、重建打包、提交
 
 上一轮遗留的四件事全部做完。
