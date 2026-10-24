@@ -142,6 +142,60 @@ function currentContent() {
   return isRich() ? richHtmlForSave() : $('editor').value;
 }
 
+/* 富文本工具栏的中文文案。Quill 自带的按钮只有图标，没有 title，悬停不出提示；
+   标题下拉与链接气泡的文字则写死在 snow 主题的 CSS 里。这里统一补中文：
+   title/aria-label 走 JS，下拉项与气泡文案走 style.css 的 ::before/::after 覆盖。
+   悬停出原生气泡，与 Markdown 工具栏的行为一致。 */
+const RICH_BUTTON_TIPS = {
+  'ql-bold': '加粗 Ctrl+B',
+  'ql-italic': '斜体 Ctrl+I',
+  'ql-underline': '下划线 Ctrl+U',
+  'ql-strike': '删除线',
+  'ql-blockquote': '引用',
+  'ql-code-block': '代码块',
+  'ql-link': '插入链接',
+  'ql-image': '插入图片（也可直接粘贴截图）',
+  'ql-clean': '清除格式',
+};
+const RICH_HEADING_LABELS = {
+  1: '标题 1', 2: '标题 2', 3: '标题 3',
+  4: '标题 4', 5: '标题 5', 6: '标题 6',
+};
+
+function localizeRichToolbar() {
+  const bar = document.querySelector('.rich-host .ql-toolbar');
+  if (!bar) return;
+  bar.querySelectorAll('button').forEach(btn => {
+    let tip = '';
+    if (btn.classList.contains('ql-list')) {
+      tip = btn.value === 'ordered' ? '有序列表' : '无序列表';
+    } else {
+      Object.keys(RICH_BUTTON_TIPS).forEach(cls => {
+        if (btn.classList.contains(cls)) tip = RICH_BUTTON_TIPS[cls];
+      });
+    }
+    if (!tip) return;
+    btn.title = tip;
+    btn.setAttribute('aria-label', tip);
+  });
+  const picker = bar.querySelector('.ql-picker.ql-header');
+  if (!picker) return;
+  const label = picker.querySelector('.ql-picker-label');
+  if (label) {
+    label.title = '段落样式';
+    label.setAttribute('aria-label', '段落样式');
+  }
+  picker.querySelectorAll('.ql-picker-item').forEach(item => {
+    const name = RICH_HEADING_LABELS[item.dataset.value] || '正文';
+    item.title = name;
+    item.setAttribute('aria-label', name);
+  });
+  // 链接气泡输入框的提示文字取自 data-link 属性——Quill 每次打开气泡都会用它重设
+  // placeholder，直接改 placeholder 会被覆盖，改属性才持久。
+  const linkInput = document.querySelector('.rich-host .ql-tooltip input[type="text"]');
+  if (linkInput) linkInput.setAttribute('data-link', '粘贴或输入链接地址');
+}
+
 /* 懒创建 Quill。工具栏用 snow 主题的完整格式集，但不含表格——Quill 2 核心没有表格模块。 */
 function ensureQuill() {
   if (state.rich) return state.rich;
@@ -158,6 +212,7 @@ function ensureQuill() {
     placeholder: '开始输入…',
     modules: { toolbar: { container: toolbar, handlers: { image: richImageHandler } } },
   });
+  localizeRichToolbar();
   /* Quill 的链接气泡默认按 document.body 夹取边界，而它自己挂在 .ql-container 里，
      容器又是 overflow:hidden。选区靠左时气泡向左溢出容器，左半边直接被裁掉。
      把夹取边界收窄到容器本身，气泡就永远留在容器内。 */

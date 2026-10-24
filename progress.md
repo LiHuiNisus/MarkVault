@@ -1,5 +1,35 @@
 # 当前进度
 
+## 2026-10-24 富文本工具栏中文化与悬停提示
+
+用户要求：框内每个操作按钮悬停出气泡说明功能，交互与 Markdown 工具栏一致；
+富文本所有按钮文字与相关提示文案全部中文，含设置链接的按钮。
+
+### 改动
+
+Quill 的 snow 主题只画图标、不给 `title`，悬停不出提示；标题下拉的 `Normal` /
+`Heading 1..6` 与链接气泡的 `Enter link:` / `Visit URL:` / `Edit` / `Save` /
+`Remove` 全部写死在 `quill.snow.css` 的伪元素 `content` 里。所以要分两处处理：
+
+- `ui/app.js` 新增 `RICH_BUTTON_TIPS` / `RICH_HEADING_LABELS` 与
+  `localizeRichToolbar()`，在 `ensureQuill()` 创建 Quill 后立即调用。
+  给 11 个按钮补 `title` + `aria-label`（有序/无序按 `button.value` 区分），
+  给段落下拉补 `title`/`aria-label` 与每项的中文名，
+  并把链接气泡输入框的 `data-link` 属性改成「粘贴或输入链接地址」——
+  Quill 每次打开气泡都用这个属性重设 `placeholder`，改 `placeholder` 会被覆盖。
+- `ui/style.css` 用 `.rich-host .ql-snow ...` 覆盖伪元素文案：
+  `正文` / `标题 1..6`、`链接地址：`、`访问链接：`、`编辑` / `保存` / `移除`。
+
+### 验证
+
+- harness 下发四个按钮的 `title`、下拉项文案、气泡四种状态（`::before`/`::after`
+  计算值）全部中文，`data-link` 已改；无 JS 报错。
+- 九套探针全部 0 失败（`qa-markdown` / `qa-rich` / `qa-library` / `qa-keys` /
+  `rich-e2e` / `rich-e2e2` / `rich-layout` / `rich-link-geometry`；
+  `rich-link-tooltip` 是几何诊断脚本，无断言）。
+- 重新 `cargo build --release` + `cargo-tauri build` + 静默安装，真机 CDP 复核通过；
+  截图见 `tmp-tests/rich-toolbar-zoom.png`、`rich-picker-zoom.png`。
+
 ## 2026-10-24 安装 0.1.3
 
 用 `MarkVault_0.1.3_x64-setup.exe /S` 静默安装到 `D:\MarkVault`（覆盖 0.1.2 的安装产物）。

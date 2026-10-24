@@ -703,6 +703,28 @@ button, input, textarea { font-family: inherit; }
 .rich-host .ql-toolbar.ql-snow .ql-stroke { stroke: currentColor; }
 .rich-host .ql-toolbar.ql-snow .ql-fill { fill: currentColor; }
 .rich-host .ql-toolbar.ql-snow .ql-picker { color: var(--text-secondary); }
+/* Quill 的标题下拉与链接气泡文案写死在 quill.snow.css 的 ::before/::after 里，
+   这里用更高的选择器特异性覆盖成中文。按钮的 title/aria-label 由 app.js 的
+   localizeRichToolbar() 补，两处配合才能做到工具栏与气泡全中文。 */
+.rich-host .ql-snow .ql-picker.ql-header .ql-picker-label::before,
+.rich-host .ql-snow .ql-picker.ql-header .ql-picker-item::before { content: '正文'; }
+.rich-host .ql-snow .ql-picker.ql-header .ql-picker-label[data-value="1"]::before,
+.rich-host .ql-snow .ql-picker.ql-header .ql-picker-item[data-value="1"]::before { content: '标题 1'; }
+.rich-host .ql-snow .ql-picker.ql-header .ql-picker-label[data-value="2"]::before,
+.rich-host .ql-snow .ql-picker.ql-header .ql-picker-item[data-value="2"]::before { content: '标题 2'; }
+.rich-host .ql-snow .ql-picker.ql-header .ql-picker-label[data-value="3"]::before,
+.rich-host .ql-snow .ql-picker.ql-header .ql-picker-item[data-value="3"]::before { content: '标题 3'; }
+.rich-host .ql-snow .ql-picker.ql-header .ql-picker-label[data-value="4"]::before,
+.rich-host .ql-snow .ql-picker.ql-header .ql-picker-item[data-value="4"]::before { content: '标题 4'; }
+.rich-host .ql-snow .ql-picker.ql-header .ql-picker-label[data-value="5"]::before,
+.rich-host .ql-snow .ql-picker.ql-header .ql-picker-item[data-value="5"]::before { content: '标题 5'; }
+.rich-host .ql-snow .ql-picker.ql-header .ql-picker-label[data-value="6"]::before,
+.rich-host .ql-snow .ql-picker.ql-header .ql-picker-item[data-value="6"]::before { content: '标题 6'; }
+.rich-host .ql-snow .ql-tooltip::before { content: '访问链接：'; }
+.rich-host .ql-snow .ql-tooltip[data-mode="link"]::before { content: '链接地址：'; }
+.rich-host .ql-snow .ql-tooltip a.ql-action::after { content: '编辑'; }
+.rich-host .ql-snow .ql-tooltip.ql-editing a.ql-action::after { content: '保存'; }
+.rich-host .ql-snow .ql-tooltip a.ql-remove::before { content: '移除'; }
 .rich-host .ql-container.ql-snow {
   border: none; flex: 1; min-height: 0; overflow: hidden;
   font-family: var(--font-editor); font-size: var(--editor-font-size);
