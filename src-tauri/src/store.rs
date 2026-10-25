@@ -29,6 +29,34 @@ pub struct Note {
     pub content: String,
 }
 
+/// 侧栏自定义排序：文件夹之间的顺序 + 每个文件夹（根目录用空串作键）内的笔记顺序。
+/// 存在库根的 `.markvault-order.json`（不是笔记，扩展名不是笔记类型，扫描时自动跳过）。
+/// 顺序是展示元数据，不写进任何笔记的 frontmatter。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct VaultOrder {
+    #[serde(default)]
+    pub folders: Vec<String>,
+    #[serde(default)]
+    pub notes: std::collections::HashMap<String, Vec<String>>,
+}
+
+/// 排序文件：点开头，资源管理器里默认隐藏，也不会被当成文件夹或笔记列出。
+pub const ORDER_FILE: &str = ".markvault-order.json";
+
+/// 读取排序文件。文件不存在或内容损坏时返回空顺序（前端会按当前列表补齐），不报错。
+pub fn read_order(dir: &Path) -> VaultOrder {
+    let raw = match std::fs::read_to_string(dir.join(ORDER_FILE)) {
+        Ok(r) => r,
+        Err(_) => return VaultOrder::default(),
+    };
+    serde_json::from_str(&raw).unwrap_or_default()
+}
+
+pub fn write_order(dir: &Path, order: &VaultOrder) -> Result<(), String> {
+    let raw = serde_json::to_string_pretty(order).map_err(|e| e.to_string())?;
+    std::fs::write(dir.join(ORDER_FILE), raw).map_err(|e| e.to_string())
+}
+
 /// 笔记的两种类型：Markdown 与富文本。类型在创建时确定，之后不可更改。
 /// 类型落在文件扩展名上（.md / .html），磁盘是唯一事实来源，不写进 frontmatter。
 pub const KIND_MD: &str = "md";
@@ -517,6 +545,57 @@ mod tests {
         write_note(&dir, "n.md", &Note { meta, content: "c".into() }).unwrap();
         let note = read_note(&dir, "n.md").unwrap();
         assert!(note.meta.modified.as_str() > "2026-01-01");
+    }
+}
+
+#[cfg(test)]
+mod order_tests {
+    use super::*;
+
+    fn tmp_dir() -> std::path::PathBuf {
+        tempfile::tempdir().unwrap().keep()
+    }
+
+    #[test]
+    fn test_order_roundtrip() {
+        let dir = tmp_dir();
+        let mut notes = std::collections::HashMap::new();
+        notes.insert("".to_string(), vec!["b.md".to_string(), "a.md".to_string()]);
+        notes.insert("工作".to_string(), vec!["工作/x.md".to_string()]);
+        let order = VaultOrder { folders: vec!["工作".into()], notes };
+        write_order(&dir, &order).unwrap();
+        let back = read_order(&dir);
+        assert_eq!(back.folders, vec!["工作".to_string()]);
+        assert_eq!(back.notes[""], vec!["b.md".to_string(), "a.md".to_string()]);
+        assert_eq!(back.notes["工作"], vec!["工作/x.md".to_string()]);
+    }
+
+    #[test]
+    fn test_order_missing_file_is_empty() {
+        let dir = tmp_dir();
+        let back = read_order(&dir);
+        assert!(back.folders.is_empty());
+        assert!(back.notes.is_empty());
+    }
+
+    #[test]
+    fn test_order_broken_file_is_empty() {
+        let dir = tmp_dir();
+        std::fs::write(dir.join(ORDER_FILE), "{not json").unwrap();
+        // 损坏的排序文件不能拖垮启动：读成空顺序，前端会按当前列表重建
+        let back = read_order(&dir);
+        assert!(back.folders.is_empty());
+    }
+
+    #[test]
+    fn test_order_file_not_listed_as_note_or_folder() {
+        let dir = tmp_dir();
+        std::fs::write(dir.join(ORDER_FILE), "{\"folders\":[],\"notes\":{}}").unwrap();
+        std::fs::write(dir.join("a.md"), "---\n{\"title\":\"A\"}\n---\nx").unwrap();
+        // .markvault-order.json 是点开头的非笔记文件，既不能出现在笔记列表里，也不能当文件夹
+        let list = list_notes(&dir);
+        assert_eq!(list.len(), 1, "{:?}", list.iter().map(|m| &m.file_name).collect::<Vec<_>>());
+        assert!(list_folders(&dir).is_empty());
     }
 }
 

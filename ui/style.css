@@ -142,6 +142,14 @@ button, input, textarea { font-family: inherit; }
   padding: 0 16px; height: 52px;
   background: var(--header-bg); color: var(--header-text);
   flex-shrink: 0; z-index: 10;
+  min-width: 0;
+}
+/* 窄窗口：顶栏按钮组原本把整行撑出视口，页面出现横向滚动条。
+   不能给 .header-bar 加 overflow:hidden —— 导出/视图下拉是它的绝对定位子元素，
+   会被一起裁掉、点不到。改为收紧间距并隐藏次要信息（路径在编辑区标题行也能看到）。 */
+@media (max-width: 1024px) {
+  .header-bar { gap: 8px; padding: 0 10px; }
+  .header-path { display: none; }
 }
 .header-brand { display: flex; align-items: center; gap: 10px; min-width: 0; flex-shrink: 0; }
 .brand-logo {
@@ -207,6 +215,10 @@ button, input, textarea { font-family: inherit; }
   border-radius: 6px; white-space: nowrap; transition: background .15s, color .15s;
 }
 .dropdown-item:hover { background: var(--accent-soft); color: var(--accent); }
+/* 语义化隐藏优先于布局：.dropdown-item 自己设了 display:flex，会盖掉浏览器给
+   [hidden] 的默认 display:none。富文本笔记要藏掉「Markdown / PNG」导出项，
+   缺这条规则它们仍然可见可点，一点就导出上一个 Markdown 笔记的内容。 */
+.dropdown-item[hidden] { display: none !important; }
 /* 导出菜单的格式说明：小字副标题，讲清每个格式的用途与代价 */
 .dropdown-item .df-hint {
   margin-left: auto; padding-left: 12px;
@@ -496,7 +508,21 @@ button, input, textarea { font-family: inherit; }
 #note-list .folder-header.drop-target { background: var(--accent-soft); color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
 /* 笔记行也是落点（等于放进它所属的文件夹），用虚线描边表明"这一整块都能落" */
 #note-list li.in-folder.drop-target { box-shadow: inset 0 0 0 1px var(--accent); }
-#note-list li.dragging { opacity: .4; }
+#note-list li.dragging { opacity: .4; cursor: grabbing; }
+/* 排序插入位置：行上方/下方画一条插入线，与"拖进文件夹"的整块描边区分开 */
+#note-list li.drop-before::after,
+#note-list li.drop-after::after,
+#note-list .folder-header.drop-before::after,
+#note-list .folder-header.drop-after::after {
+  content: ''; position: absolute; left: 4px; right: 4px; height: 2px;
+  background: var(--accent); border-radius: 1px; pointer-events: none;
+}
+#note-list li.drop-before::after, #note-list .folder-header.drop-before::after { top: -1px; }
+#note-list li.drop-after::after, #note-list .folder-header.drop-after::after { bottom: -1px; }
+/* 文件夹可拖动：给一点视觉暗示，拖动时抬高一层 */
+#note-list .folder-header { cursor: grab; }
+#note-list .folder-header:active { cursor: grabbing; }
+#note-list .folder-header.dragging { opacity: .45; }
 
 #note-list li.folder-new { padding: 5px 8px; }
 #note-list li.folder-new input {
@@ -703,6 +729,16 @@ button, input, textarea { font-family: inherit; }
 .rich-host .ql-toolbar.ql-snow .ql-stroke { stroke: currentColor; }
 .rich-host .ql-toolbar.ql-snow .ql-fill { fill: currentColor; }
 .rich-host .ql-toolbar.ql-snow .ql-picker { color: var(--text-secondary); }
+/* 撤销/重做由 localizeRichToolbar() 插入：Quill 自带主题不给这两个按钮样式，
+   这里让它们与旁边的原生按钮长得一样。 */
+.rich-host .ql-toolbar.ql-snow button.ql-undo-bridge {
+  float: none; display: inline-flex; align-items: center; justify-content: center;
+  width: 28px; height: 24px; padding: 3px 5px; vertical-align: middle;
+}
+.rich-host .ql-toolbar.ql-snow button.ql-undo-bridge svg {
+  width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.8;
+  stroke-linecap: round; stroke-linejoin: round; float: none;
+}
 /* Quill 的标题下拉与链接气泡文案写死在 quill.snow.css 的 ::before/::after 里，
    这里用更高的选择器特异性覆盖成中文。按钮的 title/aria-label 由 app.js 的
    localizeRichToolbar() 补，两处配合才能做到工具栏与气泡全中文。 */

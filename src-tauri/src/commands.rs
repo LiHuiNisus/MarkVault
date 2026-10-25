@@ -393,6 +393,20 @@ fn sort_metas(metas: &mut [NoteMeta], sort: Option<&str>) {
     }
 }
 
+/// 侧栏自定义顺序（文件夹之间 + 每个文件夹内的笔记）。由前端在拖动排序后整体写回。
+#[tauri::command]
+pub fn get_order() -> store::VaultOrder {
+    vault_dir()
+        .map(|d| store::read_order(&d))
+        .unwrap_or_default()
+}
+
+#[tauri::command]
+pub fn save_order(order: store::VaultOrder) -> Result<(), String> {
+    let dir = vault_dir().ok_or("未配置笔记文件夹")?;
+    store::write_order(&dir, &order)
+}
+
 /// 删除笔记：前端已确认文件名，此处仅删除（保留给已有流程复用）。
 /// 返回值 true=进了系统回收站，false=回收站不可用、已永久删除（前端要如实告知用户）。
 #[tauri::command]

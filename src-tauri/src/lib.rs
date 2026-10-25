@@ -23,6 +23,8 @@ pub fn run() {
             commands::set_config,
             commands::pick_vault_dir,
             commands::list_notes,
+            commands::get_order,
+            commands::save_order,
             commands::read_note,
             commands::save_note,
             commands::search_notes,
