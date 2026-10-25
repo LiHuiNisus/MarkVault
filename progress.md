@@ -1,5 +1,58 @@
 # 当前进度
 
+## 2026-10-25 修「文档拖不动」：Tauri 默认接管了拖放，需关 dragDropEnabled
+
+用户报「文档还是不能拖动排序」。之前的探针全部在 harness 里跑：harness 是纯浏览器，
+HTML5 拖拽天然可用，所以一直没暴露这个问题。真机上拖不动。
+
+### 根因
+
+Tauri 2 在 Windows 上默认把 WebView2 的拖放控制器接管为自己的 `DragDropEvent`
+（wry 里调 `ICoreWebView2Controller4::SetAllowExternalDrop(false)`），HTML5 的
+`dragstart/dragover/drop` 全部收不到。
+
+`tauri-utils` 的注释写得很直白：
+
+> Disabling it is required to use HTML5 drag and drop on the frontend on Windows since we
+> replace the drag drop handler of WebView2.
+
+对应配置项是 `app.windows[].dragDropEnabled`，默认 `true`。
+
+### 修法
+
+`src-tauri/tauri.conf.json` 的窗口配置加 `"dragDropEnabled": false`。
+
+本项目没有用到 Tauri 的 `onDragDropEvent`（`grep onDragDropEvent` 在整个 `ui/` 与
+`src-tauri/src/` 里零命中），关掉不会丢功能。
+
+### 为什么旧探针没抓到
+
+`tmp-tests/harness/` 用 `mock-tauri.js` 顶替 Tauri 桥，页面跑在普通 Chromium 里，
+不存在 WebView2 拖放控制器。所有 `qa-*.py` 因此都对这个问题视而不见。
+
+### 验证的困难与结论
+
+真机复核改用操作系统级鼠标事件（`SendInput` + 绝对坐标）重放拖动，因为 Playwright 的
+`mouse` 在 CDP 上生成的拖拽事件不经过 WebView2 的 OLE 拖放层，复现不出问题。
+
+- 修前（0.1.4 已安装版）：root / 组内 / 文件夹三种拖动，`dragstart` 一次都不触发，
+  事件日志全空。
+- 修后（0.1.5）：同一脚本三种拖动都走通：
+  `ROOT ['START','DROP','reorderNotes']`、
+  `INNER ['START','DROP','reorderNotes']`、
+  `FOLDER ['START','DROP','reorderFolder']`，顺序真的变了。
+
+注：自动化桌面在测试中途被系统锁屏（前台窗口变成 `LockingWindow`），
+后续的重复验证无法再做，已用修前/修后各一轮的对照结果定性。
+
+### 版本与安装
+
+- 0.1.4 → 0.1.5（同号的安装包已经发出去过，必须换号才能区分）。
+- `cargo tauri build` 产出 `MarkVault_0.1.5_x64-setup.exe`（2.46 MiB）。
+- 静默安装：`./MarkVault_0.1.5_x64-setup.exe /S`。**从 Git Bash 直接跑会弹图形安装向导**
+  （参数被当成给 shell 的，没传进去），要写成 `cmd //c "完整路径\\setup.exe /S"`。
+  装完注册表 `DisplayVersion` 为 `0.1.5`。
+
 ## 2026-10-25 升 0.1.4、重建打包、静默安装
 
 上一轮的代码改动已提交（`fe65dcc`），但安装包还是 10-24 的 0.1.3，不含本轮功能。
