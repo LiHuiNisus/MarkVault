@@ -1,5 +1,42 @@
 # 当前进度
 
+## 2026-10-25 升 0.1.4、重建打包、静默安装
+
+上一轮的代码改动已提交（`fe65dcc`），但安装包还是 10-24 的 0.1.3，不含本轮功能。
+这次把版本号升到 0.1.4 并重新打包安装。
+
+### 改动
+
+- `src-tauri/Cargo.toml` 与 `src-tauri/tauri.conf.json` 版本号 0.1.3 → 0.1.4。
+  同号重发会让装过的人分不清手里是新是旧版本。
+- `cargo tauri build`：release 产物 49 秒；NSIS 产出
+  `MarkVault_0.1.4_x64-setup.exe`（2.47 MiB）。
+- NSIS 会对 release 产物再打一次 bundle 类型信息，所以打包后又把
+  `target/release/app.exe` 重新 `cp` 回仓库根 `app.exe`。
+
+### 验证
+
+- `cargo test`：37 lib + 20 folders + 1 recycle = 58 项全过。
+- 仓库根 `app.exe` 的 `FileVersion` / `ProductVersion` 均为 `0.1.4`。
+- 打包前用 CDP 连真机：排序下拉含 `manual`、`state.order` 有值、`bindFolderDrag` /
+  `syncGutterHeights` / `normalizeUrl` 均为 function、`get_order` 返回已存顺序。
+- 静默安装 `./MarkVault_0.1.4_x64-setup.exe /S` 退出码 0，
+  注册表 `DisplayVersion` 变为 `0.1.4`、`InstallLocation` 仍为 `D:\MarkVault`。
+- 安装后再启动复核：同一组功能检查全部通过、13 篇笔记列出、顺序文件的三个文件夹名读回来了。
+
+### 坑（沿用之前的记录）
+
+- 安装后的 `app.exe` md5 与 `target/release/app.exe` 不同是预期行为（NSIS 写入 bundle 信息），
+  **不能用 md5 判断装没装上，要看 `VersionInfo` 和注册表 `DisplayVersion`**。
+- 强杀 app 会留孤儿 `msedgewebview2.exe`，占着 profile 锁时新实例约 3 秒后静默退出。
+  安装/重启前先 `taskkill //IM msedgewebview2.exe //F`。
+
+### 未做
+
+- 仓库没有配置 remote，提交只在本地。
+- 仍记录在案不修的三项：撤销图片插入后 `.assets/` 留孤儿文件、富文本图片无缩放/alt 编辑、
+  粘贴 60 张图约 1.5 秒卡顿。
+
 ## 2026-10-25 续：富文本专项复查，再修 10 处
 
 富文本方向的子代理跑完 144 项检查后回报了 6 个真缺陷和一批体验问题，逐条复核并修复。
