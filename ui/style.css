@@ -214,6 +214,10 @@ button, input, textarea { font-family: inherit; }
 
 /* ===== 下拉菜单 ===== */
 .dropdown { position: relative; display: flex; }
+/* .dropdown 自己设了 display:flex，会盖掉浏览器给 [hidden] 的 display:none。
+   「更多格式」(#tb-more-dropdown) 就是靠 hidden 控制显隐的——缺这条规则它
+   在按钮全放得下时照样显示，点开就是一个空菜单（里面一个项都没有）。 */
+.dropdown[hidden] { display: none !important; }
 .dropdown-menu {
   position: absolute; top: 100%; left: 0; margin-top: 6px;
   background: var(--panel-bg); border: 1px solid var(--border);
@@ -222,6 +226,9 @@ button, input, textarea { font-family: inherit; }
   z-index: 100; overflow: hidden; padding: 4px;
 }
 .dropdown-menu.show { display: flex; }
+/* 空菜单绝不显示：没有菜单项的弹层会变成一个 40px 的空白框，
+   点「更多」的人只会以为功能坏了。没有内容就不给 show。 */
+.dropdown-menu.show:empty { display: none; }
 .header-actions .dropdown-menu { left: auto; right: 0; }
 .dropdown-item {
   display: flex; align-items: center; gap: 8px;

@@ -1,5 +1,59 @@
 # 当前进度
 
+## 2026-11-01 修复「更多格式」空弹框
+
+编辑工具栏右侧的「⋯」在按钮全放得下时（≥1180 宽、或 ≤1100 的单栏/收起侧栏）依然显示，
+点开是一块空白。两个原因叠在一起：
+
+1. `layoutToolbar()` 靠 `toolbarMore.hidden = true` 收按钮，但 `.dropdown` 自己设了
+   `display:flex`，优先级高于浏览器给 `[hidden]` 的 `display:none` —— 这条 hidden 从来没生效，
+   按钮一直看得见（`getComputedStyle` 是 `flex`，`hidden` 属性却为 `true`）。
+2. 此时 `#tb-more-menu` 里一个子节点都没有，`.dropdown-menu.show` 只设了 `display:flex`，
+   于是弹出一个 172×9 的空框（只剩 padding）。
+
+修法（`ui/style.css` + `ui/app.js`，不动 HTML）：
+
+- `.dropdown[hidden] { display: none !important; }` —— 让 hidden 真的生效，也不需要 JS 兜底。
+- `.dropdown-menu.show:empty { display: none; }` —— 任何空菜单都不显示，防以后再踩。
+- `bindMenu()` 里加一道：`if (!m.children.length) { closeAllMenus(); return; }`，
+  空菜单点了不弹框。
+
+### 验证
+
+- 宽度扫描 1440/1280/1190/1180/1150/1100/1050/1000/980/900：`moreDisplay` 与 `moreHidden` 一致
+  （能放下时 `none`，"更多"真的消失），有内容的菜单点开正常（1280 收 3 项、1190 收 5 项、1050 收 2 项）。
+- 顶栏其他菜单（更多 / 导出 / 视图 / 标题）仍全部可开，项数与文案不变。
+- 回归：`p2_toolbar.py` / `p2_resp.py` / `p2_recent.py` / `p2_table.py` / `p2_scrim.py` 全绿，`errors: []`。
+- `ui/` 三个文件无 BOM。
+
+## 2026-11-01 打包 0.1.6 并重装
+
+P0/P1/P2 的 22 条整改提交为 `25fedb3` 后，出安装包并覆盖安装。
+
+- 版本 0.1.5 → 0.1.6（`Cargo.toml` / `tauri.conf.json` / `Cargo.lock` 一处）。
+  同号重发会让装过的人分不清手里是新是旧，必须换号。
+- `cargo tauri build` 51s，产出 `MarkVault_0.1.6_x64-setup.exe`（2.50 MiB）。
+  NSIS 会对 release 产物再打一次 bundle 类型信息，打包后重新把
+  `target/release/app.exe` 复制回仓库根 `app.exe`。
+- 静默安装覆盖 `D:\MarkVault`（`setup.exe /S`，退出码 0），注册表 `DisplayVersion` 已是 0.1.6。
+
+### 装机后核对（CDP 连真机，只读）
+
+- 版本：仓库根 `app.exe` 的 `FileVersion` / `ProductVersion` 均为 0.1.6，注册表同步。
+- P0/P1：无 `#title-input`、类型徽标在有值、19 行笔记全带摘要（取正文首行截断）、
+  全带复选框与相对时间（`10-11`，`title` 里是 `2026-10-11 12:39:39`）、行高 66、
+  标签胶囊 2 个、`#btn-tags` / `#batch-bar` / `#scope-note` / `#save-state` 都在。
+- P2：工具栏 1 行 35px（`trackW == trackSW == 510`）、表格选择器 64 格默认「3 × 3」、
+  最近笔记 5 篇（另有 4 篇可切）、980 宽进单栏且侧栏收到 `x=-306`、无横向滚动、拉回 1280 还原 `both`。
+- 页面错误 0；笔记库 `notes\` 11 篇、`..\MarkVault` 4 篇，修改时间未变。
+
+### 注意
+
+- 打包后 `target/release/app.exe` 已被 NSIS 写入 bundle 信息，与仓库根 `app.exe`
+  （从打包前的产物复制）md5 不同是预期行为，判断装没装成功要看 `VersionInfo` 与注册表。
+- CDP 探针要在启动前设 `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9222`；
+  安装程序启动的那份实例不带这个变量，9222 会连不上，需要手动重启一次 `app.exe`。
+
 ## 2026-11-01 P2 交互整改：工具栏 / 表格 / 图片与任务 / 最近笔记 / 响应式
 
 走查报告与逐项验收：`..\MarkVault-UX-Review\`（`P2修复说明-20261101.md`、`p2-shots\`）。
@@ -686,7 +740,10 @@ $('editor-scroll').scrollTop = Math.max(0, line * lineH - $('editor-scroll').cli
 
 ## 尚未完成
 
-- 安装包（`MarkVault_0.1.5_x64-setup.exe`）仍是旧构建，需 `cargo tauri build` 后重装才会生效。
-  本轮只改代码，没有升版本号、没有打包。
-- 仓库根 `app.exe` 已用本轮 release 覆盖，但该文件被 `.gitignore` 忽略，不入库。
-- P0/P1/P2 全部改动已提交为 `f07cc09`（22 条问题，9 个文件，+2325 −314）。
+- P0/P1/P2 全部改动已提交为 `25fedb3`（22 条问题，9 个文件，+2326 −315）。
+- 「更多格式」空弹框的修复（`ui/style.css` + `ui/app.js`）与 0.1.6 版本号三处
+  （`Cargo.toml` / `tauri.conf.json` / `Cargo.lock`）一起入库，即当前 HEAD。
+- **本机已装的 0.1.6 仍是修复前的前端**（`ui/` 打进 `app.exe`，改前端必须重新打包）。
+  要让它生效需要出 0.1.7 再装一次——同号重发会让装过的人分不清手里是新是旧。
+- 仓库根 `app.exe` 已用上一轮 release 覆盖，该文件被 `.gitignore` 忽略，不入库。
+- 安装包 `src-tauri/target/release/bundle/nsis/` 在 `.gitignore` 覆盖范围内，不入库。

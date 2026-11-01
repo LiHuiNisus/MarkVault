@@ -2998,6 +2998,10 @@ function bindMenu(btnId, menuId) {
   btn.addEventListener('click', e => {
     e.stopPropagation();
     const m = menu;
+    // 空菜单不开：里面的项是 toolbarToMenu 按宽度搬进来的，窄窗口下一个都没搬
+    // 也会露出「更多格式」按钮，点开就是一块空白（div 没有子节点，高度只剩 padding）。
+    // 宁可什么都不发生，也不要弹一个空框。
+    if (!m.children.length) { closeAllMenus(); return; }
     const show = !m.classList.contains('show');
     closeAllMenus();
     m.classList.toggle('show', show);
