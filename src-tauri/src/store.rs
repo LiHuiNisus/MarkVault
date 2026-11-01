@@ -20,6 +20,10 @@ pub struct NoteMeta {
     pub created: String,
     #[serde(default)]
     pub modified: String,
+    /// 列表里显示的一行摘要（由正文派生，不落盘）。列表只拿元数据，
+    /// 没有它侧栏就只能显示标题+时间，翻找时缺少判断依据。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub excerpt: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -109,6 +113,7 @@ pub fn parse_frontmatter(raw: &str) -> (NoteMeta, String) {
         tags: vec![],
         created: String::new(),
         modified: String::new(),
+        excerpt: String::new(),
     };
     if lines.next() != Some("---") {
         return (fallback, raw.to_string());
@@ -136,8 +141,145 @@ pub fn serialize_note(meta: &NoteMeta, content: &str) -> String {
     // kind 由磁盘扩展名推出，不落进 frontmatter：文件改名后元数据不会自相矛盾
     let mut meta = meta.clone();
     meta.kind = String::new();
+    // excerpt 是列表用的派生数据：写进 frontmatter 只会随着正文改动变成脏数据
+    meta.excerpt = String::new();
     let json = serde_json::to_string(&meta).unwrap_or_default();
     format!("---\n{}\n---\n{}", json, content)
+}
+
+/* ---------- 列表摘要 ---------- */
+
+const EXCERPT_CHARS: usize = 80;
+
+/// 把正文压成一行摘要：跳过代码块与空行，剥掉 Markdown 标记与链接地址。
+/// 列表用它给"这篇讲什么"一个判断依据，比只显示标题+时间有用得多。
+pub fn make_excerpt(content: &str, kind: &str) -> String {
+    let src = if kind == KIND_RICH {
+        strip_html_text(content)
+    } else {
+        content.to_string()
+    };
+    let mut out = String::new();
+    let mut in_fence = false;
+    for line in src.lines() {
+        let t = line.trim();
+        if t.starts_with("```") || t.starts_with("~~~") {
+            in_fence = !in_fence;
+            continue;
+        }
+        if in_fence || t.is_empty() {
+            continue;
+        }
+        // 表格分隔行（|---|---|）只剩符号，摘要里是纯噪音
+        if (t.chars().all(|c| matches!(c, '-' | ':' | '|' | ' '))) {
+            continue;
+        }
+        let cleaned = clean_md_line(t);
+        if cleaned.is_empty() {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(&cleaned);
+        if out.chars().count() >= EXCERPT_CHARS {
+            break;
+        }
+    }
+    truncate_chars(collapse_spaces(&out), EXCERPT_CHARS)
+}
+
+/// 富文本：去掉标签与注释，块级标签位置补空格，避免相邻段落粘成一个词。
+fn strip_html_text(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut in_tag = false;
+    for c in html.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' => {
+                in_tag = false;
+                out.push(' ');
+            }
+            _ if !in_tag => out.push(c),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// 去掉行内 Markdown 标记；`[文字](链接)` / `![alt](图)` 只保留可见文字，
+/// 否则摘要里会出现一长串 URL，把真正有用的内容挤掉。
+fn clean_md_line(line: &str) -> String {
+    let cs: Vec<char> = line.chars().collect();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < cs.len() {
+        let c = cs[i];
+        if c == '!' && i + 1 < cs.len() && cs[i + 1] == '[' {
+            if let Some((label, next)) = take_label(&cs, i + 2) {
+                out.push_str(&label);
+                i = next;
+                continue;
+            }
+        }
+        if c == '[' {
+            if let Some((label, next)) = take_label(&cs, i + 1) {
+                out.push_str(&label);
+                i = next;
+                continue;
+            }
+        }
+        if matches!(c, '#' | '*' | '`' | '>' | '|' | '~' | '_' | '[' | ']') {
+            i += 1;
+            continue;
+        }
+        out.push(c);
+        i += 1;
+    }
+    // 列表项与任务项的行首标记（"- "、"- [ ] "）对摘要没有信息量，只留正文
+    collapse_spaces(&out)
+        .trim_start_matches(|c: char| c == '-' || c == '+' || c == '•' || c == ' ')
+        .to_string()
+}
+
+/// 读 `[标签](地址)`：返回标签文本与收尾下标（指向 `)` 之后）。
+fn take_label(cs: &[char], start: usize) -> Option<(String, usize)> {
+    let mut j = start;
+    let mut label = String::new();
+    while j < cs.len() && cs[j] != ']' {
+        label.push(cs[j]);
+        j += 1;
+    }
+    if j >= cs.len() {
+        return None;
+    }
+    j += 1; // 跳过 ]
+    if j < cs.len() && cs[j] == '(' {
+        let mut depth = 1;
+        j += 1;
+        while j < cs.len() && depth > 0 {
+            match cs[j] {
+                '(' => depth += 1,
+                ')' => depth -= 1,
+                _ => {}
+            }
+            j += 1;
+        }
+    }
+    Some((label, j))
+}
+
+fn collapse_spaces(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn truncate_chars(s: String, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s;
+    }
+    let mut out: String = s.chars().take(max).collect();
+    out.push('…');
+    out
 }
 
 /// 扫描单侧目录中的笔记（.md / .html），rel_prefix 为 None（根）或 Some("文件夹名")。
@@ -157,7 +299,7 @@ fn collect_notes(dir: &Path, rel_prefix: Option<&str>, metas: &mut Vec<NoteMeta>
             Ok(r) => r,
             Err(_) => continue,
         };
-        let (mut meta, _) = parse_frontmatter(&raw);
+        let (mut meta, content) = parse_frontmatter(&raw);
         if meta.title.is_empty() {
             meta.title = strip_note_ext(&name).to_string();
         }
@@ -179,8 +321,9 @@ fn collect_notes(dir: &Path, rel_prefix: Option<&str>, metas: &mut Vec<NoteMeta>
         meta.kind = kind_of_name(&name).unwrap_or(KIND_MD).to_string();
         meta.file_name = match rel_prefix {
             Some(p) => format!("{}/{}", p, name),
-            None => name,
+            None => name.clone(),
         };
+        meta.excerpt = make_excerpt(&content, meta.kind.as_str());
         metas.push(meta);
     }
 }
@@ -274,6 +417,8 @@ pub fn read_note(dir: &Path, file_name: &str) -> Result<Note, String> {
         None => String::new(),
     };
     meta.file_name = file_name.to_string();
+    // 保存/读取都会把 meta 回给前端，摘要跟着内容一起给：列表行更新时不必再读一次盘
+    meta.excerpt = make_excerpt(&content, meta.kind.as_str());
     Ok(Note { meta, content })
 }
 
@@ -286,6 +431,19 @@ pub fn write_note(dir: &Path, file_name: &str, note: &Note) -> Result<(), String
     let mut meta = note.meta.clone();
     meta.modified = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
     let raw = serialize_note(&meta, &note.content);
+    std::fs::write(&path, raw).map_err(|e| e.to_string())
+}
+
+/// 只改标签、不碰正文与 modified。
+/// 标签改名/删除是"整理元数据"，不是编辑内容：沿用 write_note 会把 modified 改成现在，
+/// 一次整理就把整库的「按修改时间」排序打乱，用户看到的是一堆笔记突然跳到最前。
+pub fn rewrite_tags(dir: &Path, file_name: &str, tags: Vec<String>) -> Result<(), String> {
+    let note = read_note(dir, file_name)?;
+    let mut meta = note.meta.clone();
+    meta.tags = tags;
+    meta.excerpt = String::new();
+    let raw = serialize_note(&meta, &note.content);
+    let path = resolve_note_path(dir, file_name)?;
     std::fs::write(&path, raw).map_err(|e| e.to_string())
 }
 
@@ -480,6 +638,7 @@ mod tests {
             tags: vec![],
             created: String::new(),
             modified: String::new(),
+            excerpt: String::new(),
         };
         let raw = serialize_note(&meta, "x");
         assert!(!raw.contains("\"kind\""), "{}", raw);
@@ -518,6 +677,7 @@ mod tests {
             tags: vec!["a".into()],
             created: "2026-10-05T10:00:00".into(),
             modified: "2026-10-05T10:00:00".into(),
+            excerpt: String::new(),
         };
         let raw = serialize_note(&meta, "正文");
         let (meta2, content2) = parse_frontmatter(&raw);
@@ -541,10 +701,44 @@ mod tests {
         let meta = NoteMeta {
             file_name: "n.md".into(), folder: String::new(), title: "N".into(), kind: String::new(), tags: vec![],
             created: "2026-01-01T00:00:00".into(), modified: "2026-01-01T00:00:00".into(),
+            excerpt: String::new(),
         };
         write_note(&dir, "n.md", &Note { meta, content: "c".into() }).unwrap();
         let note = read_note(&dir, "n.md").unwrap();
         assert!(note.meta.modified.as_str() > "2026-01-01");
+    }
+
+    #[test]
+    fn test_rewrite_tags_keeps_modified_and_content() {
+        let dir = tmp_dir();
+        let meta = NoteMeta {
+            file_name: "t.md".into(), folder: String::new(), title: "T".into(), kind: String::new(),
+            tags: vec!["旧".into(), "保留".into()],
+            created: "2026-01-01T00:00:00".into(), modified: "2026-01-02T00:00:00".into(),
+            excerpt: String::new(),
+        };
+        write_note(&dir, "t.md", &Note { meta, content: "正文不动".into() }).unwrap();
+        let before = read_note(&dir, "t.md").unwrap();
+        rewrite_tags(&dir, "t.md", vec!["新".into(), "保留".into()]).unwrap();
+        let after = read_note(&dir, "t.md").unwrap();
+        assert_eq!(after.meta.tags, vec!["新".to_string(), "保留".to_string()]);
+        assert_eq!(after.content, "正文不动");
+        // 标签是元数据：整理标签不该把笔记的修改时间刷新成现在
+        assert_eq!(after.meta.modified, before.meta.modified);
+    }
+
+    #[test]
+    fn test_make_excerpt_strips_markup_and_truncates() {        let md = "# 标题\n\n- [ ] 待办事项\n\n| 列A | 列B |\n| --- | --- |\n| 1 | 2 |\n\n**加粗** 与 [链接](https://example.com) 还有 `代码`";
+        let ex = make_excerpt(md, KIND_MD);
+        assert!(ex.contains("待办事项"), "{}", ex);
+        assert!(!ex.contains("https"), "URL 不该进摘要: {}", ex);
+        assert!(!ex.contains('['), "{}", ex);
+        assert!(!ex.contains('#'), "{}", ex);
+        assert!(!ex.contains("---"), "{}", ex);
+        let long = "字".repeat(200);
+        let cut = make_excerpt(&long, KIND_MD);
+        assert_eq!(cut.chars().count(), EXCERPT_CHARS + 1);
+        assert!(cut.ends_with('…'));
     }
 }
 
@@ -646,6 +840,7 @@ mod rename_tests {
             tags: vec![],
             created: "2026-01-01T00:00:00".into(),
             modified: "2026-01-02T00:00:00".into(),
+            excerpt: String::new(),
         };
         write_note(&dir, "r.md", &Note { meta, content: "x".into() }).unwrap();
         let m1 = read_note(&dir, "r.md").unwrap().meta.modified;

@@ -21,6 +21,7 @@ fn meta(file_name: &str, folder: &str) -> NoteMeta {
         tags: vec![],
         created: "2026-01-01T00:00:00".into(),
         modified: String::new(),
+        excerpt: String::new(),
     }
 }
 
@@ -307,6 +308,7 @@ fn set_tags_can_clear_all_tags() {
                 tags: vec!["旧".into()],
                 created: "2026-01-01T00:00:00".into(),
                 modified: String::new(),
+                excerpt: String::new(),
             },
             content: "A".into(),
         },

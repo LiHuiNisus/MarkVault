@@ -123,6 +123,7 @@ pub fn save_note(
         tags,
         created,
         modified: String::new(),
+        excerpt: String::new(),
     };
     store::write_note(&dir, &name, &Note { meta, content })?;
     store::read_note(&dir, &name).map(|n| n.meta)
@@ -134,6 +135,110 @@ pub fn list_folders() -> Vec<String> {
         Some(d) => store::list_folders(&d),
         None => vec![],
     }
+}
+
+/// 库里出现过的全部标签（去重、排序）：给标签输入框做候选。
+/// 没有候选时同一个标签会被写成几种写法，而标签一旦写歪，筛选就对不上。
+#[tauri::command]
+pub fn list_tags() -> Vec<String> {
+    let dir = match vault_dir() {
+        Some(d) => d,
+        None => return vec![],
+    };
+    let mut set = std::collections::BTreeSet::new();
+    for m in store::list_notes(&dir) {
+        for t in m.tags {
+            let t = t.trim();
+            if !t.is_empty() {
+                set.insert(t.to_string());
+            }
+        }
+    }
+    set.into_iter().collect()
+}
+
+/// 标签 + 使用篇数，供标签管理面板列出。
+#[derive(serde::Serialize)]
+pub struct TagCount {
+    pub name: String,
+    pub count: usize,
+}
+
+#[tauri::command]
+pub fn list_tag_counts() -> Vec<TagCount> {
+    let dir = match vault_dir() {
+        Some(d) => d,
+        None => return vec![],
+    };
+    let mut map: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    for m in store::list_notes(&dir) {
+        for t in m.tags {
+            let t = t.trim();
+            if !t.is_empty() {
+                *map.entry(t.to_string()).or_insert(0) += 1;
+            }
+        }
+    }
+    map.into_iter().map(|(name, count)| TagCount { name, count }).collect()
+}
+
+/// 标签改名的核心：把某个标签在所有笔记里换成 `to`（目标已存在即合并）。
+/// 只改 frontmatter 的 tags，保留 modified；返回被改动的笔记数。
+fn retag(dir: &std::path::Path, from: &str, to: Option<&str>) -> Result<usize, String> {
+    let from_lc = from.to_lowercase();
+    let mut changed = 0;
+    for m in store::list_notes(dir) {
+        let hit = m.tags.iter().any(|t| t.to_lowercase() == from_lc);
+        if !hit {
+            continue;
+        }
+        let mut seen = std::collections::HashSet::new();
+        let mut tags = Vec::new();
+        for t in m.tags.iter() {
+            let next = match to {
+                Some(to) if t.to_lowercase() == from_lc => to.to_string(),
+                Some(_) => t.clone(),
+                None if t.to_lowercase() == from_lc => continue,
+                None => t.clone(),
+            };
+            // 合并后可能出现重名（原笔记同时有 from 与 to）：按小写去重
+            if seen.insert(next.to_lowercase()) {
+                tags.push(next);
+            }
+        }
+        store::rewrite_tags(dir, &m.file_name, tags)?;
+        changed += 1;
+    }
+    Ok(changed)
+}
+
+/// 改名 / 合并：`to` 已存在时就是合并。返回被改动的笔记数。
+#[tauri::command]
+pub fn rename_tag(from: String, to: String) -> Result<usize, String> {
+    let dir = vault_dir().ok_or("未配置笔记文件夹")?;
+    let from = from.trim().to_string();
+    let to = to.trim().trim_start_matches('#').trim().to_string();
+    if from.is_empty() {
+        return Err("原标签为空".into());
+    }
+    if to.is_empty() {
+        return Err("新标签不能为空（要删除请用「删除标签」）".into());
+    }
+    if to.contains(',') || to.contains('，') {
+        return Err("标签里不能包含逗号".into());
+    }
+    retag(&dir, &from, Some(&to))
+}
+
+/// 从所有笔记里摘掉某个标签（笔记本身保留）。返回被改动的笔记数。
+#[tauri::command]
+pub fn delete_tag(tag: String) -> Result<usize, String> {
+    let dir = vault_dir().ok_or("未配置笔记文件夹")?;
+    let tag = tag.trim().to_string();
+    if tag.is_empty() {
+        return Err("标签为空".into());
+    }
+    retag(&dir, &tag, None)
 }
 
 #[tauri::command]
@@ -208,6 +313,11 @@ pub fn pick_image(
     Ok(Some(PickedImage {
         data: base64::engine::general_purpose::STANDARD.encode(&bytes),
         ext,
+        name: std::path::Path::new(&path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_string(),
     }))
 }
 
@@ -215,6 +325,9 @@ pub fn pick_image(
 pub struct PickedImage {
     pub data: String,
     pub ext: String,
+    /// 原始文件名（含扩展名）。前端拿它当图片的 alt：alt 固定成"图片"时，
+    /// 图片加载失败或者导出的 PDF 只剩一个空框，读者完全不知道那是什么。
+    pub name: String,
 }
 
 /// 资源子目录：粘贴/插入的图片落在这里。以点开头，会被 list_folders 当隐藏项跳过，
@@ -311,36 +424,74 @@ pub fn search_notes(
         .collect();
     // None = 不按文件夹筛选；Some("") = 只看根目录
     let folder_filter = folder;
-    let mut metas: Vec<NoteMeta> = store::list_notes(&dir)
-        .into_iter()
-        .filter(|m| {
-            if let Some(f) = &folder_filter {
-                if &m.folder != f {
-                    return false;
+    let mut metas: Vec<NoteMeta> = Vec::new();
+    for mut m in store::list_notes(&dir) {
+        if let Some(f) = &folder_filter {
+            if &m.folder != f {
+                continue;
+            }
+        }
+        if !tag_filter.is_empty() {
+            let have: Vec<String> = m.tags.iter().map(|t| t.to_lowercase()).collect();
+            if !tag_filter.iter().all(|t| have.contains(t)) {
+                continue;
+            }
+        }
+        if terms.is_empty() {
+            metas.push(m);
+            continue;
+        }
+        // 正文只读一次：先按类型压成纯文本，再小写做匹配，最后用原文截命中片段。
+        // 富文本正文是 HTML，不剥标签的话搜 "strong" 会命中所有加粗的笔记。
+        let plain = store::read_note(&dir, &m.file_name)
+            .map(|n| {
+                if m.kind == store::KIND_RICH {
+                    strip_html_tags(&n.content)
+                } else {
+                    n.content
                 }
-            }
-            if !tag_filter.is_empty() {
-                let have: Vec<String> = m.tags.iter().map(|t| t.to_lowercase()).collect();
-                if !tag_filter.iter().all(|t| have.contains(t)) {
-                    return false;
-                }
-            }
-            if terms.is_empty() {
-                return true;
-            }
-            // 正文只读一次，供所有关键词复用。
-            // 富文本笔记的正文是 HTML：先剥标签再匹配，否则搜 "strong" 会命中所有加粗的笔记。
-            let content = store::read_note(&dir, &m.file_name)
-                .map(|n| {
-                    let raw = if m.kind == store::KIND_RICH { strip_html_tags(&n.content) } else { n.content };
-                    raw.to_lowercase()
-                })
-                .unwrap_or_default();
-            note_matches(m, &content, &terms)
-        })
-        .collect();
+            })
+            .unwrap_or_default();
+        let content_lc = plain.to_lowercase();
+        if !note_matches(&m, &content_lc, &terms) {
+            continue;
+        }
+        // 命中片段以第一个关键词为中心：列表里能直接看出"为什么这条被搜出来"
+        if let Some(snip) = snippet_around(&plain, &terms) {
+            m.excerpt = snip;
+        }
+        metas.push(m);
+    }
     sort_metas(&mut metas, sort.as_deref());
     metas
+}
+
+/// 以最早出现的关键词为中心截一段摘要（约 60 字符），前后加省略号。
+/// 用字符下标而不是字节下标：中文关键词命中时按字节切会 panic。
+fn snippet_around(text: &str, terms: &[String]) -> Option<String> {
+    let lc = text.to_lowercase();
+    let byte_pos = terms.iter().filter_map(|t| lc.find(t.as_str())).min()?;
+    let hit_char = lc[..byte_pos].chars().count();
+    let chars: Vec<char> = text.chars().collect();
+    if chars.is_empty() {
+        return None;
+    }
+    let start = hit_char.saturating_sub(12);
+    let end = (start + 60).min(chars.len());
+    let mut out = String::new();
+    if start > 0 {
+        out.push('…');
+    }
+    out.extend(chars[start..end].iter());
+    if end < chars.len() {
+        out.push('…');
+    }
+    let squeezed = out.split_whitespace().collect::<Vec<_>>().join(" ");
+    if squeezed.is_empty() {
+        None
+    } else {
+        Some(squeezed)
+    }
 }
 
 /// 按空白拆分查询串为关键词（已小写）。空串得到空向量。
@@ -521,7 +672,7 @@ pub fn import_note(
     let picked = app
         .dialog()
         .file()
-        .set_title("打开 Markdown 文档")
+        .set_title("导入 Markdown 文档（复制进笔记库）")
         .set_parent(&window)
         .add_filter("Markdown / 富文本", &["md", "markdown", "html", "htm"])
         .blocking_pick_files();
@@ -679,6 +830,7 @@ mod search_tests {
             tags: tags.iter().map(|t| t.to_string()).collect(),
             created: String::new(),
             modified: String::new(),
+            excerpt: String::new(),
         }
     }
 

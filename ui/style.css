@@ -65,7 +65,7 @@
   --radius: 10px;
   --radius-lg: 14px;
 
-  --sidebar-width: 248px;
+  --sidebar-width: 268px;
   --outline-panel-width: 236px;
 }
 [data-theme="dark"] {
@@ -144,13 +144,8 @@ button, input, textarea { font-family: inherit; }
   flex-shrink: 0; z-index: 10;
   min-width: 0;
 }
-/* 窄窗口：顶栏按钮组原本把整行撑出视口，页面出现横向滚动条。
-   不能给 .header-bar 加 overflow:hidden —— 导出/视图下拉是它的绝对定位子元素，
-   会被一起裁掉、点不到。改为收紧间距并隐藏次要信息（路径在编辑区标题行也能看到）。 */
-@media (max-width: 1024px) {
-  .header-bar { gap: 8px; padding: 0 10px; }
-  .header-path { display: none; }
-}
+/* 窄窗口适配写在顶栏规则之后（见本段末尾）：媒体查询不提升优先级，
+   放在基础规则之前会被后面的同权重规则覆盖，等于没写。 */
 .header-brand { display: flex; align-items: center; gap: 10px; min-width: 0; flex-shrink: 0; }
 .brand-logo {
   display: inline-flex; align-items: center; justify-content: center;
@@ -161,15 +156,40 @@ button, input, textarea { font-family: inherit; }
 .brand-info { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .brand { font-weight: 700; font-size: 16px; color: var(--text); white-space: nowrap; }
 .brand-sep { color: var(--header-muted); opacity: 0.45; font-size: 13px; }
-.filename-input {
-  flex: 1; min-width: 72px; max-width: min(320px, 32vw);
-  padding: 3px 8px; border: 1px solid transparent; border-radius: var(--radius-sm);
+/* 侧栏开关：文字随状态变（收起列表 / 展开列表），图标只是辅助。
+   「收起/展开」把两个动作写在一起，用户还得先判断现在是哪种状态。 */
+.header-bar .header-toggle {
+  display: inline-flex; align-items: center; gap: 6px;
+  margin-left: 6px; padding: 6px 10px;
+  border: 1px solid transparent; border-radius: var(--radius-sm);
   background: transparent; color: var(--header-muted);
-  font-size: 14px; font-weight: 600; outline: none;
-  transition: border-color .2s, color .2s, background .2s;
+  font-size: 12.5px; font-weight: 500; cursor: pointer; white-space: nowrap;
 }
-.filename-input:hover { color: var(--header-text); background: var(--surface); border-color: var(--border); }
-.filename-input:focus { color: var(--text); background: var(--panel-bg); border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+.header-bar .header-toggle:hover { background: var(--surface); color: var(--text); }
+.header-toggle .icon { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; }
+/* 保存状态：一个点 + 一句话，点一下立即落盘。
+   自动保存是常态，独立的「保存」按钮反而让人怀疑"到底存没存"。 */
+.header-bar .save-state {
+  display: inline-flex; align-items: center; gap: 7px;
+  padding: 5px 9px; border: 1px solid transparent; border-radius: 999px;
+  background: transparent; color: var(--header-muted);
+  font-size: 12px; cursor: pointer; white-space: nowrap; min-width: 0;
+  font-family: inherit;
+}
+.header-bar .save-state:hover { background: var(--surface); color: var(--text); }
+.save-state #save-status { overflow: hidden; text-overflow: ellipsis; max-width: 220px; }
+/* 状态用圆点表达，正文保持中性色：绿色 12px 文字在白底上只有 1.9:1，读不清 */
+.save-state #save-status.ok { color: var(--header-muted); font-weight: 400; }
+.save-state #save-status.error { color: var(--danger); font-weight: 600; }
+.save-dot { width: 7px; height: 7px; border-radius: 50%; background: #b9bec7; flex-shrink: 0; }
+.save-state[data-state="ok"] .save-dot { background: #22c55e; }
+.save-state[data-state="dirty"] .save-dot { background: #f0b429; }
+.save-state[data-state="saving"] .save-dot { background: #6C5CE7; animation: save-pulse 1s ease-in-out infinite; }
+.save-state[data-state="error"] .save-dot { background: var(--danger); }
+.save-state[data-state="error"] { color: var(--danger); }
+@keyframes save-pulse { 0%,100% { opacity: 1 } 50% { opacity: .35 } }
+.header-bar .icon-only { padding: 7px 9px; }
+.header-bar .icon-only .icon { width: 15px; height: 15px; fill: currentColor; stroke: none; }
 .header-status {
   display: flex; align-items: center; gap: 6px;
   font-size: 12px; color: var(--header-muted); white-space: nowrap;
@@ -178,12 +198,7 @@ button, input, textarea { font-family: inherit; }
 .header-status.ok span#save-status { color: #4ade80; }
 #save-status.error { color: #f87171; font-weight: 600; }
 #save-status.ok { color: #4ade80; }
-.header-bar button[aria-pressed="true"] { background: var(--header-btn-hover); color: #fff; }
-/* 收起/展开保持与「打开」同款底色：aria-pressed 只用于无障碍状态，不改外观 */
-.header-bar #btn-sidebar[aria-pressed="true"] { background: var(--header-btn-bg); color: var(--accent); }
-.header-bar #btn-sidebar[aria-pressed="true"]:hover { background: var(--header-btn-hover); color: #fff; }
-.header-status .icon { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 2; opacity: 0.75; }
-.header-actions { display: flex; align-items: center; gap: 10px; flex-shrink: 0; margin-left: auto; }
+.header-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 1; min-width: 0; margin-left: auto; }
 .header-bar button {
   display: inline-flex; align-items: center; gap: 6px;
   padding: 7px 12px; border: 1px solid transparent; border-radius: var(--radius-sm);
@@ -232,15 +247,25 @@ button, input, textarea { font-family: inherit; }
   padding: 0 2px; font-variant-numeric: tabular-nums;
 }
 
-/* 顶栏路径：让用户随时知道这篇笔记存哪，点击在资源管理器中定位 */
-.header-path {
-  max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  padding: 3px 8px; border: 1px solid transparent; border-radius: 6px;
-  background: transparent; color: var(--header-muted);
-  font-size: 11px; cursor: pointer; font-family: ui-monospace, Consolas, monospace;
+/* 窄窗口：顶栏控件组必须能压缩。规则放在这里（基础规则之后）才生效——
+   媒体查询不提升优先级，写在前面会被后面的同权重规则覆盖。
+   900px 是窗口允许的最小宽度，此时优先丢掉字数和状态文字，保住导出与「更多」。 */
+@media (max-width: 1024px) {
+  .header-bar { gap: 8px; padding: 0 10px; }
+  .header-brand { gap: 8px; }
+  #header-word-count { display: none; }
+  .save-state #save-status { max-width: 96px; }
+  .header-actions { gap: 4px; }
 }
-.header-path:hover { background: var(--header-btn-bg); color: var(--header-text); border-color: var(--border); }
-.header-path[hidden] { display: none; }
+@media (max-width: 960px) {
+  .header-toggle #sidebar-toggle-label { display: none; }
+  .header-toggle { padding: 7px 9px; margin-left: 2px; }
+  .save-state #save-status { max-width: 64px; }
+  /* 三栏挤到 900 时，标签行放不下输入框 + 类型开关：允许换行，
+     否则开关会被编辑区裁掉一半（看起来像渲染坏了）。 */
+  .title-row { flex-wrap: wrap; }
+  #tags-input { min-width: 140px; }
+}
 
 /* 右下角 toast：导出/复制这类一次性反馈，避免只闪顶栏一行小字 */
 .toast {
@@ -260,21 +285,40 @@ button, input, textarea { font-family: inherit; }
   background: var(--accent); color: #fff; font-size: 12px; cursor: pointer;
 }
 .toast-action:hover { background: var(--accent-hover); }
+/* 失败提示要和成功区分开，并且停留更久（showToast 里 9s） */
+.toast.is-error { border-color: rgba(217, 45, 32, .35); background: #fff6f5; color: #9f1c12; }
+.toast.is-error .toast-action { background: #d92d20; }
+body[data-theme="dark"] .toast.is-error { background: #2a1614; color: #ffb4ab; border-color: rgba(248, 113, 113, .35); }
+/* 提醒（不算失败）：黄色，比错误轻、比普通提示重 */
+.toast.is-warn { border-color: rgba(214, 158, 46, .45); background: #fffaf0; color: #7a5300; }
+.toast.is-warn .toast-action { background: #b07d10; }
+body[data-theme="dark"] .toast.is-warn { background: #2a2114; color: #ffd58a; border-color: rgba(240, 180, 40, .4); }
+.save-state[data-state="warn"] .save-dot { background: #f0b429; }
+.save-state[data-state="warn"] { color: var(--text-secondary); }
+.save-state #save-status.warn { color: var(--text-secondary); font-weight: 400; }
 
-/* 首次运行引导卡片 */
+/* 首次运行引导：右下角浮卡，不再压暗全屏拦截点击。
+   它只是说明，不该成为"开始写"之前的最后一道门。 */
 .first-run {
-  position: fixed; inset: 0; z-index: 320;
-  display: flex; align-items: center; justify-content: center;
-  background: rgba(0, 0, 0, .28);
+  position: fixed; right: 20px; bottom: 20px; z-index: 320;
+  display: block;
 }
 .first-run-card {
-  width: 380px; max-width: 88vw; padding: 22px 24px;
+  position: relative;
+  width: 360px; max-width: 88vw; padding: 18px 20px 16px;
   background: var(--panel-bg); border: 1px solid var(--border);
   border-radius: 14px; box-shadow: var(--shadow-lg);
 }
-.first-run-title { font-size: 15px; font-weight: 600; color: var(--text); margin-bottom: 12px; }
-.first-run-steps { margin: 0 0 18px; padding-left: 20px; color: var(--text-secondary); font-size: 13px; line-height: 1.9; }
-.first-run-ok { width: 100%; padding: 9px; border: none; border-radius: var(--radius-sm); background: var(--accent); color: #fff; font-size: 13px; font-weight: 500; cursor: pointer; }
+.first-run-close {
+  position: absolute; top: 8px; right: 8px;
+  width: 24px; height: 24px; border: none; border-radius: 6px;
+  background: transparent; color: var(--text-muted); cursor: pointer; font-size: 12px;
+}
+.first-run-close:hover { background: var(--surface); color: var(--text); }
+.first-run-title { font-size: 15px; font-weight: 600; color: var(--text); margin-bottom: 10px; padding-right: 20px; }
+.first-run-steps { margin: 0 0 12px; padding-left: 18px; color: var(--text-secondary); font-size: 12.5px; line-height: 1.85; }
+.first-run-keys { font-size: 11px; color: var(--text-muted); margin-bottom: 12px; line-height: 1.7; }
+.first-run-ok { width: 100%; padding: 8px; border: none; border-radius: var(--radius-sm); background: var(--accent); color: #fff; font-size: 13px; font-weight: 500; cursor: pointer; }
 .first-run-ok:hover { background: var(--accent-hover); }
 
 /* 预览空态 */
@@ -316,10 +360,21 @@ button, input, textarea { font-family: inherit; }
 .sidebar-top { padding: 10px 10px 6px; display: flex; flex-direction: column; gap: 8px; }
 .sidebar-actions { display: flex; gap: 8px; }
 .sidebar-sort #sort-select {
-  width: 100%; padding: 5px 8px; font-size: 12px; color: var(--text-secondary);
+  flex: 1; min-width: 0;
+  padding: 5px 8px; font-size: 12px; color: var(--text-secondary);
   background: var(--panel-bg); border: 1px solid var(--border); border-radius: var(--radius-sm);
   cursor: pointer; outline: none;
 }
+.sidebar-sort { display: flex; gap: 6px; align-items: center; }
+/* 标签管理入口：和排序放在同一行，日常看得见但视觉重量低于主按钮 */
+.sidebar-tool {
+  flex: 0 0 auto; width: 30px; height: 30px; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--panel-bg); color: var(--text-secondary); cursor: pointer;
+}
+.sidebar-tool:hover { background: var(--accent-soft); color: var(--accent); border-color: transparent; }
+.sidebar-tool .icon { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
 .sidebar-sort #sort-select:focus { border-color: var(--accent); }
 
 /* ===== 编辑器内查找条 ===== */
@@ -354,17 +409,18 @@ button, input, textarea { font-family: inherit; }
   transition: background .15s;
 }
 #btn-new:hover { background: var(--accent-hover); }
-/* 新建文件夹：方形图标按钮，与主按钮同高同圆角，视觉重量低一档（描边而非实心） */
-#btn-new-folder {
-  flex: 0 0 auto; width: 34px; padding: 0;
+/* 新建旁边的下拉：视觉上是主按钮的附属箭头，不再是另一个"看不懂的图标按钮" */
+.sidebar-actions .dropdown { flex: 0 0 auto; display: flex; }
+.sidebar-add {
+  width: 32px; padding: 0;
   display: inline-flex; align-items: center; justify-content: center;
   border: 1px solid var(--border); border-radius: var(--radius-sm);
   background: var(--panel-bg); color: var(--text-secondary); cursor: pointer;
   transition: background .15s, color .15s, border-color .15s;
 }
-#btn-new-folder:hover { background: var(--accent-soft); color: var(--accent); border-color: transparent; }
-#btn-new-folder .icon {
-  width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.7;
+.sidebar-add:hover { background: var(--accent-soft); color: var(--accent); border-color: transparent; }
+.sidebar-add .icon {
+  width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.8;
   stroke-linecap: round; stroke-linejoin: round;
 }
 #search {
@@ -380,13 +436,26 @@ button, input, textarea { font-family: inherit; }
 #note-list li[data-file]:focus .nt { color: var(--accent); }
 #note-list li {
   position: relative;
-  padding: 8px 10px; cursor: pointer; border-radius: 8px; margin-bottom: 2px;
+  padding: 6px 9px; cursor: pointer; border-radius: 8px; margin-bottom: 1px;
   transition: background .15s;
 }
 #note-list li:hover { background: var(--surface); }
 #note-list li.active { background: var(--accent-soft); }
 #note-list li.active .nt { color: var(--accent); font-weight: 600; }
-#note-list .nt-wrap { min-width: 0; }
+#note-list .nt-wrap { min-width: 0; padding-left: 15px; position: relative; }
+/* 多选复选框：常驻占位、悬停/选中显形。占位不参与 hover 变化，标题基线不会跳 */
+#note-list .nt-check {
+  position: absolute; left: 0; top: 2px;
+  width: 13px; height: 13px; border-radius: 4px;
+  border: 1.5px solid #c8ccd4; background: var(--panel-bg);
+  opacity: 0; transition: opacity .12s, background .12s, border-color .12s;
+}
+#note-list li:hover .nt-check, #note-list li.selected .nt-check { opacity: 1; }
+#note-list li.selected .nt-check { background: var(--accent); border-color: var(--accent); }
+#note-list li.selected .nt-check::after {
+  content: ""; position: absolute; left: 3.5px; top: 0.5px; width: 3px; height: 7px;
+  border: solid #fff; border-width: 0 1.5px 1.5px 0; transform: rotate(45deg);
+}
 #note-list .nt { font-size: 13px; font-weight: 500; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* 富文本笔记标记：与 Markdown 笔记在列表里一眼可分 */
 #note-list .nt-kind {
@@ -394,7 +463,13 @@ button, input, textarea { font-family: inherit; }
   border-radius: 3px; background: rgba(108, 92, 231, .12); color: var(--accent);
   font-size: 10px; font-weight: 600; vertical-align: 1px;
 }
-#note-list .nm { font-size: 11px; color: var(--text-muted); margin-top: 2px; }
+/* 第二行：摘要占满、时间贴右。摘要给「这篇讲什么」，时间只负责排序感知 */
+#note-list .nm {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 11.5px; color: var(--muted, #6b7280); margin-top: 0; min-width: 0;
+}
+#note-list .nm .ex { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#note-list .nm .when { flex-shrink: 0; color: #6b7280; font-variant-numeric: tabular-nums; }
 /* 悬停出现的操作按钮（编辑/删除），右上角悬浮 */
 #note-list .nt-ops {
   position: absolute; top: 6px; right: 6px;
@@ -418,12 +493,13 @@ button, input, textarea { font-family: inherit; }
   border: 1px solid var(--accent); border-radius: 4px; outline: none;
   background: var(--panel-bg); color: var(--text); box-sizing: border-box;
 }
-#note-list .lt { margin-top: 4px; display: flex; flex-wrap: wrap; gap: 4px; }
+#note-list .lt { margin-top: 2px; display: flex; flex-wrap: wrap; gap: 4px; }
 #note-list .lt-tag {
   display: inline-block; padding: 1px 8px; border-radius: 999px;
-  background: var(--accent-soft); color: var(--accent);
-  font-size: 10px; line-height: 1.5; cursor: pointer;
+  background: var(--accent-soft); color: #5646c9;
+  font-size: 10.5px; line-height: 1.55; cursor: pointer;
 }
+body[data-theme="dark"] #note-list .lt-tag { color: #b9b0ff; }
 #note-list .lt-tag:hover { background: var(--accent); color: #fff; }
 #note-list li.empty { color: var(--text-muted); cursor: default; text-align: center; font-size: 12px; padding: 16px 10px; }
 
@@ -442,6 +518,11 @@ button, input, textarea { font-family: inherit; }
 #note-list .folder-header:first-child { margin-top: 2px; }
 #note-list .folder-header:hover { background: var(--surface); }
 #note-list .folder-header.selected { background: var(--accent-soft); color: var(--accent); }
+/* 新建文件夹后闪一下：它按自定义顺序排在末尾，不提示就等于"没建成功" */
+#note-list .folder-header.just-created {
+  background: var(--accent-soft); color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
 #note-list .folder-header .chev {
   flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center;
   width: 16px; height: 16px;
@@ -462,9 +543,13 @@ button, input, textarea { font-family: inherit; }
 #note-list .folder-header .folder-count { flex-shrink: 0; font-size: 10px; font-weight: 500; color: var(--text-muted); }
 #note-list .folder-header.selected .folder-count { color: var(--accent); }
 #note-list .folder-header .folder-ops { display: none; flex-shrink: 0; gap: 1px; }
-#note-list .folder-header:hover .folder-ops { display: inline-flex; }
-#note-list .folder-header .nt-op { width: 20px; height: 20px; }
-#note-list .folder-header .nt-op .icon { width: 12px; height: 12px; }
+#note-list .folder-header:hover .folder-ops,
+#note-list .folder-header.selected .folder-ops { display: inline-flex; }
+#note-list .folder-header .nt-op { width: 22px; height: 22px; }
+#note-list .folder-header .nt-op .icon { width: 13px; height: 13px; }
+/* 文件夹「⋯」：单个入口，替代原来三个要悬停才能分辨的小图标 */
+#note-list .folder-more { opacity: .7; }
+#note-list .folder-more:hover { opacity: 1; }
 
 /* 文件夹内的笔记：左侧留一条极细的导轨，缩进不靠外层容器 */
 #note-list li.in-folder { margin-left: 10px; }
@@ -503,6 +588,58 @@ button, input, textarea { font-family: inherit; }
 }
 .filter-chip:hover { border-color: var(--accent); }
 .filter-chip.is-sel { background: var(--surface); color: var(--text-secondary); }
+/* 标签筛选 chip：与文件夹筛选区分开，点一下移除 */
+.filter-chip.is-tag { background: var(--surface); color: var(--text-secondary); }
+.filter-chip.is-tag:hover { border-color: var(--accent); color: var(--accent); }
+
+/* ===== 批量操作条（选中后出现在侧栏底部） ===== */
+.batch-bar {
+  display: flex; align-items: center; gap: 8px;
+  margin: 0 8px 8px; padding: 7px 9px;
+  background: #1f2430; color: #fff; border-radius: 10px;
+  box-shadow: 0 8px 20px rgba(15, 23, 42, .18);
+  font-size: 12px;
+}
+.batch-bar[hidden] { display: none; }
+.batch-count { font-weight: 600; white-space: nowrap; }
+.batch-actions { margin-left: auto; display: flex; gap: 4px; }
+.batch-actions button {
+  border: none; border-radius: 6px; padding: 3px 8px;
+  background: rgba(255, 255, 255, .13); color: #fff;
+  font-size: 11.5px; cursor: pointer;
+}
+.batch-actions button:hover { background: rgba(255, 255, 255, .26); }
+.batch-actions button.danger:hover { background: #dc2626; }
+/* 批量「移动」的文件夹菜单：从批量条上方弹出 */
+.batch-move-menu {
+  position: fixed; z-index: 260; min-width: 150px;
+  background: var(--panel-bg); border: 1px solid var(--border);
+  border-radius: 10px; box-shadow: var(--shadow-md); padding: 4px;
+}
+.batch-move-menu[hidden] { display: none; }
+/* 最近笔记浮层：列标题 + 所在文件夹，宽度固定免得长短标题把菜单撑得忽宽忽窄 */
+.recent-menu { min-width: 220px; max-width: 340px; }
+.recent-menu[hidden] { display: none; }
+.recent-menu .recent-item { gap: 10px; }
+.recent-menu .recent-title {
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.recent-menu .df-hint { flex-shrink: 0; padding-left: 8px; }
+
+/* 当前笔记不在筛选结果里时的提示条：避免"列表空了但编辑区还有内容"的困惑 */
+.scope-note {
+  display: flex; align-items: center; gap: 8px;
+  margin: 0 0 8px; padding: 7px 12px;
+  background: var(--panel-bg); border: 1px solid var(--border); border-radius: 10px;
+  color: var(--text-secondary); font-size: 12px;
+}
+.scope-note[hidden] { display: none; }
+.scope-note .icon { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.8; flex-shrink: 0; }
+.scope-note button {
+  margin-left: auto; border: none; border-radius: 6px; padding: 3px 9px;
+  background: var(--accent-soft); color: var(--accent); font-size: 11.5px; cursor: pointer;
+}
+.scope-note button:hover { background: var(--accent); color: #fff; }
 
 /* 拖拽落点 */
 #note-list .folder-header.drop-target { background: var(--accent-soft); color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
@@ -619,18 +756,28 @@ button, input, textarea { font-family: inherit; }
 /* ===== 编辑工具栏 ===== */
 .editor-toolbar {
   display: flex; align-items: center; gap: 4px;
-  padding: 6px 12px; min-height: 42px;
+  padding: 4px 10px; min-height: 34px;
   border-bottom: 1px solid var(--border); flex-shrink: 0;
 }
 .editor-toolbar .format-group { flex: 1; min-width: 0; display: flex; align-items: center; }
-/* 两行换行显示；菜单仍用 fixed 定位（bindMenu），不受 overflow 裁剪 */
+/* 单行固定高度：放不下的低频按钮由 layoutToolbar() 搬进「更多格式」，
+   不再靠换行硬塞——换行会让工具栏从 1 行变成 2 行，编辑区跟着上下跳。 */
 .editor-toolbar .format-group-track {
-  display: flex; align-items: center; gap: 0; flex-wrap: wrap;
-  max-width: 100%; row-gap: 2px;
+  display: flex; align-items: center; gap: 0; flex-wrap: nowrap;
+  max-width: 100%; overflow: hidden;
 }
+.editor-toolbar .divider[hidden] { display: none; }
+/* 被搬进「更多格式」的按钮在菜单里恢复成"图标 + 文字"的普通菜单项 */
+#tb-more-menu .in-more {
+  width: 100%; justify-content: flex-start; gap: 8px;
+  height: 30px; padding: 0 10px; border-radius: 6px;
+}
+#tb-more-menu .in-more .tb-more-label { font-size: 12.5px; font-weight: 400; color: inherit; }
+#tb-more-menu { min-width: 172px; }
+.toolbar-more { flex: 0 0 auto; margin-left: 2px; }
 .editor-toolbar button {
   display: inline-flex; align-items: center; justify-content: center; gap: 4px;
-  padding: 4px; min-width: 28px; height: 28px;
+  padding: 3px; min-width: 26px; height: 26px;
   border: none; border-radius: 4px; background: transparent;
   color: var(--toolbar-icon); font-size: 12px; font-weight: 500;
   cursor: pointer; flex-shrink: 0; transition: background .15s, color .15s;
@@ -639,10 +786,9 @@ button, input, textarea { font-family: inherit; }
   width: 15px; height: 15px; fill: none;
   stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round;
 }
-.editor-toolbar button .txt { font-size: 12px; }
-.editor-toolbar button:hover { background: var(--accent-soft); color: var(--toolbar-icon-hover); }
+.editor-toolbar button .txt { font-size: 12px; }.editor-toolbar button:hover { background: var(--accent-soft); color: var(--toolbar-icon-hover); }
 .editor-toolbar button b, .editor-toolbar button i, .editor-toolbar button s { font-size: 12px; font-weight: 600; }
-.editor-toolbar .divider { width: 1px; height: 18px; background: var(--border); margin: 0 4px; flex-shrink: 0; }
+.editor-toolbar .divider { width: 1px; height: 16px; background: var(--border); margin: 0 3px; flex-shrink: 0; }
 .editor-toolbar .chev { font-size: 9px; }
 /* 文档标题：与编辑区正文左对齐（gutter 宽 + 内边距），大号字重，聚焦显示下划线 */
 .doc-title-row {
@@ -677,6 +823,8 @@ button, input, textarea { font-family: inherit; }
 .title-row-actions button:disabled:hover { background: transparent; color: var(--text-secondary); }
 /* 文档类型开关：只在「新笔记、尚未落盘」时可切换；落盘后变只读徽标 */
 .kind-switch { display: flex; align-items: center; gap: 2px; padding-right: 10px; flex-shrink: 0; }
+/* .kind-switch 自己设了 display:flex，会盖掉浏览器给 [hidden] 的 display:none */
+.kind-switch[hidden] { display: none !important; }
 .kind-switch button {
   height: 24px; padding: 0 8px; border: 1px solid var(--border); border-radius: 4px;
   background: transparent; color: var(--text-muted);
@@ -687,10 +835,13 @@ button, input, textarea { font-family: inherit; }
 .kind-switch button[aria-pressed="true"] {
   background: var(--accent-soft); color: var(--accent); border-color: transparent;
 }
-/* 落盘后锁定：不可点，视觉上退成标签 */
-.kind-switch.locked button { cursor: default; }
-.kind-switch.locked button:hover { background: transparent; color: var(--text-muted); }
-.kind-switch.locked button[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); }
+/* 落盘后：可切换的控件收起，只留一个只读徽标（点不了的按钮不该假装能点） */
+.kind-badge {
+  flex-shrink: 0; padding: 2px 9px; margin-left: 2px;
+  font-size: 11px; font-weight: 600; letter-spacing: .02em;
+  color: var(--text-muted); background: var(--surface);
+  border-radius: 999px; white-space: nowrap;
+}
 .title-row-actions button .icon { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 .title-row-actions .chev { font-size: 9px; }
 .title-row-actions .dropdown-menu { min-width: 140px; }
@@ -963,6 +1114,72 @@ button, input, textarea { font-family: inherit; }
 .link-modal-actions button.ghost { background: var(--surface); color: var(--text-secondary); }
 .link-modal-actions button.ghost:hover { background: var(--surface-hover); }
 
+/* ===== 表格：8×8 网格选择器 + 预览内表格操作条 ===== */
+.table-modal-box { width: 344px; }
+.table-grid-wrap { display: flex; flex-direction: column; align-items: center; gap: 8px; }
+.table-grid {
+  display: grid; grid-template-columns: repeat(8, 26px); gap: 4px;
+  grid-auto-rows: 26px; justify-content: center;
+}
+/* 网格单元：默认一条细边，划过/选中填成主色。用 button 而非 div 是为了能被 Tab 到、
+   能被键盘操作（方向键移动、Enter 落定，见 grid keydown）。 */
+.table-cell {
+  width: 26px; height: 26px; padding: 0; cursor: pointer;
+  border: 1px solid var(--border); border-radius: 4px;
+  background: var(--surface); transition: background .08s, border-color .08s;
+}
+.table-cell:hover { border-color: var(--accent); }
+.table-cell.on { background: var(--accent); border-color: var(--accent); }
+.table-cell:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.table-grid-label {
+  font-size: 13px; font-weight: 600; color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+.table-grid-hint { margin-top: 12px; font-size: 11px; line-height: 1.6; color: var(--text-muted); }
+
+/* 预览里的表格操作条：光标进表格才出现，浮在预览右上角 */
+.table-ops {
+  position: absolute; top: 8px; right: 14px; z-index: 8;
+  display: flex; gap: 4px; padding: 4px;
+  background: var(--panel-bg); border: 1px solid var(--border);
+  border-radius: 8px; box-shadow: var(--shadow-md);
+}
+.table-ops[hidden] { display: none; }
+.table-ops button {
+  padding: 3px 8px; border: none; border-radius: 5px;
+  background: var(--surface); color: var(--text-secondary);
+  font-size: 11px; font-weight: 500; cursor: pointer; white-space: nowrap;
+}
+.table-ops button:hover { background: var(--accent-soft); color: var(--accent); }
+.table-ops button.danger:hover { background: rgba(239, 68, 68, .12); color: var(--danger); }
+
+/* ===== 标签管理 ===== */
+.tag-modal-box { width: 460px; max-height: min(70vh, 620px); display: flex; flex-direction: column; }
+.tag-modal-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+.tag-modal-close {
+  width: 26px; height: 26px; border: none; border-radius: 6px;
+  background: transparent; color: var(--text-muted); cursor: pointer; font-size: 12px;
+}
+.tag-modal-close:hover { background: var(--surface); color: var(--text); }
+.tag-modal-box #tag-modal-filter { margin-bottom: 10px; }
+.tag-modal-list { flex: 1; overflow-y: auto; margin: 0 -4px; padding: 0 4px; }
+.tag-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 7px 8px; border-radius: 8px;
+}
+.tag-row:hover { background: var(--surface); }
+.tag-row-name { font-size: 13px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tag-row-name::before { content: '#'; color: var(--text-muted); margin-right: 1px; }
+.tag-row-count { margin-left: auto; font-size: 11.5px; color: var(--text-muted); white-space: nowrap; }
+.tag-row button {
+  flex: 0 0 auto; padding: 3px 9px; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--panel-bg); color: var(--text-secondary); font-size: 11.5px; cursor: pointer;
+}
+.tag-row button:hover { border-color: var(--accent); color: var(--accent); }
+.tag-row button.danger:hover { border-color: var(--danger); color: var(--danger); }
+.tag-empty { padding: 22px 8px; text-align: center; color: var(--text-muted); font-size: 12.5px; }
+.tag-modal-hint { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border); font-size: 11.5px; color: var(--text-muted); line-height: 1.6; }
+
 /* ===== 分隔条 ===== */
 .resizer { width: 4px; flex: 0 0 4px; background: transparent; cursor: col-resize; position: relative; align-self: stretch; z-index: 6; touch-action: none; }
 body.resizing { user-select: none; cursor: col-resize; }
@@ -981,6 +1198,51 @@ body.resizing { user-select: none; cursor: col-resize; }
   opacity: 1; visibility: visible; transform: translate(-50%, -50%) scale(1);
 }
 .resizer.dragging .resizer-handle { background: var(--accent); color: #fff; }
+
+/* ===== 窄窗口（P2-2）=====
+   tauri.conf.json 的最小宽度是 900，所以窄屏不是边缘场景。
+   两档处理，都不改动 HTML 结构，只改 CSS + body 上的类（见 layoutForWidth）：
+   - .is-drawer（≤1180）：侧栏改成覆盖式抽屉，不再挤压正文；打开时压一层薄遮罩。
+   - .is-narrow（≤1020）：正文默认单栏（JS 把双栏收成「编辑」），目录面板改浮层。 */
+@media (max-width: 1180px) {
+  body.is-drawer #sidebar,
+  body.is-narrow #sidebar {
+    position: absolute; top: 10px; bottom: 10px; left: 10px; z-index: 40;
+    width: min(300px, calc(100vw - 20px));
+    flex-basis: auto; box-shadow: var(--shadow-lg);
+  }
+  /* 抽屉用位移收起：margin 负值在绝对定位下不参与布局，改 transform 更直观 */
+  body.is-drawer #sidebar.hidden-left,
+  body.is-narrow #sidebar.hidden-left {
+    margin-left: 0; transform: translateX(calc(-100% - 16px));
+  }
+  body.is-drawer #sidebar,
+  body.is-narrow #sidebar { transform: translateX(0); transition: transform .24s cubic-bezier(.22,1,.36,1), opacity .18s; }
+  body.is-drawer #sidebar:not(.hidden-left)::after,
+  body.is-narrow #sidebar:not(.hidden-left)::after { content: ''; }
+  /* 抽屉打开时正文压暗一点，暗示"点别处会收起" */
+  .workspace::after {
+    content: ''; position: absolute; inset: 0; z-index: 30;
+    background: rgba(15, 18, 26, .28); opacity: 0; pointer-events: none;
+    transition: opacity .2s;
+  }
+  body.is-drawer.sidebar-shown .workspace::after,
+  body.is-narrow.sidebar-shown .workspace::after { opacity: 1; pointer-events: auto; }
+  /* z-index:0 让遮罩的 30 只在 workspace 内部比较。少了它，遮罩会以根层叠上下文的
+     30 盖住 header（z-index:10），抽屉打开时顶栏连同下拉菜单整块点不动。 */
+  .workspace { position: relative; z-index: 0; }
+}
+@media (max-width: 1020px) {
+  /* 目录：从"挤走正文的一条"改成浮在正文上的抽屉 */
+  .outline-panel.is-open {
+    position: absolute; top: 10px; bottom: 10px; right: 10px; z-index: 35;
+    flex-basis: auto; width: min(260px, calc(100vw - 20px));
+    margin-inline-end: 0; box-shadow: var(--shadow-lg);
+  }
+  .outline-panel-header, .outline-panel-body { min-width: 0; }
+  /* 预览工具条在单栏下也提供视图切换，标题让位给按钮 */
+  .preview-toolbar-title { display: none; }
+}
 
 /* ===== 打印/PDF ===== */
 @media print {

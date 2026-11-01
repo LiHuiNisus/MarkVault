@@ -32,6 +32,7 @@ fn delete_note_sends_file_to_recycle_bin() {
                 tags: vec![],
                 created: "2026-01-01T00:00:00".into(),
                 modified: String::new(),
+                excerpt: String::new(),
             },
             content: "should land in the recycle bin".into(),
         },

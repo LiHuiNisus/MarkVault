@@ -14,6 +14,9 @@ const state = {
   rich: null, richAssets: new Map(),
   // 结构化筛选：folderFilter 为 null 表示不限、'' 表示只看根目录
   folderFilter: null,
+  // 标签筛选（AND）：点列表里的标签胶囊就加进来，再点一次移除。
+  // 与搜索框的全文查询是两件事——搜索匹配正文里的词，标签只认 frontmatter。
+  tagFilter: [],
   // 「在此新建文档」显式指定的落点：null 表示没有指定，按筛选/选中文件夹推断。
   // 不直接用 activeFolder 是因为点击顺序和筛选状态会把它冲掉。
   pendingNewFolder: null,
@@ -141,7 +144,13 @@ window.addEventListener('resize', scheduleGutterSync);
 /* 预览所见即编辑所见：段内单换行渲染为 <br>。
    marked 默认把单换行合并进同一段，编辑页两行、预览一行，两侧对不上。 */
 marked.setOptions({ gfm: true, breaks: true });
+/* 记录预览当前对应哪份正文：仅编辑模式下会跳过渲染，切回双栏时要据此补一次。 */
+/* 记录"当前操作的是第几张表格"（预览里的表格顺序 = 源码里管道表的顺序）。
+   声明放在 render 之前：render 收尾要据此决定浮动条是否还该显示。 */
+let activeTableIdx = -1;
+let previewSrc = null;
 function render(md) {
+  previewSrc = md || '';
   const html = marked.parse(md || '');
   $('preview').innerHTML = DOMPurify.sanitize(html, { ADD_TAGS: ['badges', 'u'], ADD_ATTR: ['tone'] });
   enhancePreviewHtml();
@@ -149,6 +158,17 @@ function render(md) {
   renderPreviewEmptyState(!(md || '').trim());
   renderOutline();
   renderWordCount(md || '');
+  // 重渲染会替换掉预览里的 table 节点：之前定位的那张表已经不在 DOM 里了，
+  // 浮动条继续留着就会对着"不存在的表格"操作。按源码重新解析一次位置。
+  if (typeof refreshTableOpsAfterRender === 'function') refreshTableOpsAfterRender();
+}
+
+/* 渲染后重定位表格浮动条：光标还在表格里就继续显示，否则收起 */
+function refreshTableOpsAfterRender() {
+  if (typeof activeTableIdx === 'undefined' || activeTableIdx < 0) return;
+  const ta = $('editor');
+  if (document.activeElement === ta) syncTableOps();
+  else showTableOps(activeTableIdx);
 }
 
 function renderWordCount(md) {
@@ -535,7 +555,8 @@ function renderRichWordCount() {
   $('header-word-count').textContent = (cjk + cjkPunct) ? (cjk + cjkPunct) + ' 字' : words + ' 词';
 }
 
-/* 切换编辑界面。locked 为真时类型开关只作为只读徽标展示。 */
+/* 切换编辑界面。locked 为真时不再渲染可点的类型开关，只留一个只读徽标：
+   把不可逆的约束做成按钮，用户点下去只会得到一句"创建后不可更改"，是纯粹的挫败。 */
 function applyKind(kind, locked) {
   state.kind = kind === 'rich' ? 'rich' : 'md';
   state.kindLocked = !!locked;
@@ -546,12 +567,17 @@ function applyKind(kind, locked) {
   $('rich-host').hidden = !rich;
   $('editor-scroll').hidden = rich;
   const sw = $('kind-switch');
-  sw.classList.toggle('locked', state.kindLocked);
+  sw.hidden = state.kindLocked;
+  const badge = $('kind-badge');
+  if (badge) {
+    badge.hidden = !state.kindLocked;
+    badge.textContent = rich ? '富文本' : 'Markdown';
+    badge.title = '文档类型在创建时确定，落盘后不可更改';
+  }
   sw.querySelectorAll('button').forEach(b => {
     b.setAttribute('aria-pressed', String(b.dataset.kind === state.kind));
-    b.title = state.kindLocked
-      ? '文档类型创建后不可更改'
-      : (b.dataset.kind === 'rich' ? '富文本文档：所见即所得' : 'Markdown 文档：源码 + 实时预览');
+    b.tabIndex = state.kindLocked ? -1 : 0;
+    b.title = b.dataset.kind === 'rich' ? '富文本文档：所见即所得' : 'Markdown 文档：源码 + 实时预览';
   });
   // 富文本模式没有独立预览，布局强制单栏；切回时恢复用户原来的布局
   if (rich) ensureQuill();
@@ -563,6 +589,12 @@ function applyKind(kind, locked) {
     viewBtn.title = rich ? '富文本模式固定为单栏' : '视图';
   }
   updateExportMenu();
+  // 类型切换后目录要立即按新类型重建：刚切到富文本时还留着 Markdown 的
+  // 「使用 # 添加章节」提示，等于给错指令。
+  if (state.outlineOpen) renderOutline();
+  // 「另存为富文本」只对 Markdown 笔记有意义
+  const toRich = document.querySelector('#more-menu .dropdown-item[data-act="to-rich"]');
+  if (toRich) toRich.hidden = rich;
 }
 
 /* 富文本笔记没有「导出 Markdown」：HTML 转 Markdown 有损，不给半截结果 */
@@ -841,12 +873,36 @@ $('preview').addEventListener('scroll', () => {
 let saveTimer = null, saveMaxTimer = null;
 /* 保存失败后进入持久错误态：后续成功保存前不清除，避免用户误以为一直在存 */
 let saveError = '';
+/* 状态点：idle（就绪）/ dirty（未保存）/ saving（保存中）/ ok（已保存）/ error（失败）/ warn（提醒）。
+   五种状态各自有颜色，用户扫一眼标题右侧就知道"要不要等它"。
+   warn 是"做成了，但有件事你得知道"——原来这类提示借用了 error 的红色，
+   于是"Word 少了图片"和"保存失败"看起来一样严重。 */
 function setStatus(t, kind) {
   const el = $('save-status');
   el.textContent = t;
-  el.classList.remove('error', 'ok');
+  el.classList.remove('error', 'ok', 'warn');
   if (kind === 'error') el.classList.add('error');
   else if (kind === 'ok') el.classList.add('ok');
+  else if (kind === 'warn') el.classList.add('warn');
+  const wrap = $('save-state');
+  if (wrap) {
+    // 错误同时用 toast 说一遍：状态点在顶栏只有 12px，长错误会被省略号吃掉，
+    // 用户看不到"哪里失败、下一步做什么"。提醒类不弹 toast，别抢注意力。
+    if (kind === 'error' && t) showToast(t, null, 'error');
+    const s = kind === 'error' ? 'error'
+      : kind === 'warn' ? 'warn'
+        : kind === 'ok' ? 'ok'
+          : t === '未保存' ? 'dirty'
+            : /保存中/.test(t) ? 'saving'
+              : 'idle';
+    wrap.dataset.state = s;
+    wrap.title = s === 'error' ? (t + '（点击重试）')
+      : s === 'warn' ? t
+        : s === 'dirty' ? '有改动尚未落盘，约 2 秒后自动保存（点击立即保存）'
+          : s === 'saving' ? '正在保存…'
+            : s === 'ok' ? '已自动保存，点击立即保存'
+              : '自动保存已开启，点击立即保存';
+  }
 }
 /* 防抖 + 最大等待：连续打字时最多 8 秒必落盘一次，避免长时间只存在于内存 */
 function scheduleAutosave() {
@@ -864,7 +920,8 @@ async function doSave() {
   clearTimeout(saveMaxTimer);
   saveMaxTimer = null;
   const title = $('doc-title').value.trim() || '无标题';
-  const tags = $('tags-input').value.split(/[,，]/).map(s => s.trim()).filter(Boolean);
+  // 标签统一规范化：去空、去重（不区分大小写）、允许粘贴带 # 的写法
+  const tags = normalizeTags($('tags-input').value.split(/[,，]/));
   const content = currentContent();
   // 新笔记落到当前选中的文件夹；已有笔记的路径以 state.current.file_name 为准。
   // 若正开着文件夹筛选，则新笔记直接落在该文件夹里（所见即所得）。
@@ -882,6 +939,7 @@ async function doSave() {
     state.pendingNewFolder = null;
     state.dirty = false;
     LS.set('last_open', meta.file_name);
+    pushRecent(meta.file_name);
     updateHeaderPath(meta);
     document.title = (title === '无标题' ? '未命名文档' : title) + ' - MarkVault';
     saveError = '';
@@ -975,6 +1033,19 @@ function selectRangeTo(key) {
   const [a, b] = anchor <= end ? [anchor, end] : [end, anchor];
   for (let i = a; i <= b; i++) state.selected.add(keys[i]);
 }
+
+/* 标签筛选：点一下加入、再点移除。多标签取交集（后端 AND），
+   与搜索框的全文匹配叠加，互不顶替。 */
+function toggleTagFilter(tag) {
+  const t = String(tag || '').trim();
+  if (!t) return;
+  const i = state.tagFilter.indexOf(t);
+  if (i >= 0) state.tagFilter.splice(i, 1);
+  else state.tagFilter.push(t);
+  state.selected.clear();
+  refreshList();
+}
+
 /* 批量移动：逐篇调 move_notes，成功后清空选择。
    返回 [旧路径, 新路径] 数组，调用方（拖动排序）据此更新引用。 */
 async function moveSelected(toFolder) {
@@ -1000,12 +1071,47 @@ async function moveSelected(toFolder) {
     state.selected.clear();
     collapsedFolders.delete(toFolder || '');
     saveCollapsed();
-    setStatus(`已移动 ${pairs.length} 篇到「${toFolder || '根目录'}」`, 'ok');
+    notify(`已移动 ${pairs.length} 篇到「${toFolder || '根目录'}」`);
   } catch (e) {
     setStatus('批量移动失败：' + e, 'error');
   }
   await refreshList();
   return pairs;
+}
+
+/* 列表里的时间用相对说法：今天只给时分，昨天/周几/月-日逐级降级。
+   原来显示到秒（2026-10-28 18:28:00），一列里三个数字挤在一起，扫读时反而没有信息量。 */
+function relTime(iso) {
+  if (!iso) return '';
+  const d = new Date(String(iso).replace(' ', 'T'));
+  if (isNaN(d.getTime())) return String(iso).replace('T', ' ');
+  const pad = n => String(n).padStart(2, '0');
+  const hm = pad(d.getHours()) + ':' + pad(d.getMinutes());
+  const now = new Date();
+  const sameDay = d.toDateString() === now.toDateString();
+  if (sameDay) return hm;
+  const yesterday = new Date(now.getTime() - 86400000);
+  if (d.toDateString() === yesterday.toDateString()) return '昨天 ' + hm;
+  const diffDays = (now.getTime() - d.getTime()) / 86400000;
+  if (diffDays > 0 && diffDays < 7) return '周' + '日一二三四五六'[d.getDay()];
+  if (d.getFullYear() === now.getFullYear()) return (d.getMonth() + 1) + '-' + pad(d.getDate());
+  return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
+}
+
+/* 标签规范化：去掉首尾空白与空项，同名（不区分大小写）只留第一个。
+   原来直接 split 后落盘，多打一个逗号就会存进一个空标签。 */
+function normalizeTags(list) {
+  const seen = new Set();
+  const out = [];
+  for (const raw of list) {
+    const t = String(raw || '').trim().replace(/^#/, '');
+    if (!t) continue;
+    const k = t.toLowerCase();
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(t);
+  }
+  return out;
 }
 
 /* 单条笔记行：抽出来供各分组复用，逻辑照搬原先平铺列表 */
@@ -1019,6 +1125,19 @@ function buildNoteItem(n, q) {
   li.tabIndex = -1;
   const info = document.createElement('div');
   info.className = 'nt-wrap';
+  // 多选复选框：一直占位、悬停才显形，不改变文字基线。
+  // 原来只有 Ctrl+点击能多选，界面上没有任何提示，等于把功能藏起来了。
+  const check = document.createElement('span');
+  check.className = 'nt-check';
+  check.setAttribute('role', 'checkbox');
+  check.setAttribute('aria-checked', String(state.selected.has(noteKey(n))));
+  check.title = '选择这篇笔记';
+  check.onclick = e => {
+    e.stopPropagation();
+    toggleSelect(noteKey(n));
+    refreshSelectionUI();
+  };
+  info.appendChild(check);
   const nt = document.createElement('div');
   nt.className = 'nt';
   highlightText(nt, n.title, q);
@@ -1031,7 +1150,16 @@ function buildNoteItem(n, q) {
   }
   const nm = document.createElement('div');
   nm.className = 'nm';
-  nm.textContent = (n.modified || '').replace('T', ' ');
+  const ex = document.createElement('span');
+  ex.className = 'ex';
+  if (n.excerpt) highlightText(ex, n.excerpt, q);
+  else ex.textContent = '';
+  const when = document.createElement('span');
+  when.className = 'when';
+  when.textContent = relTime(n.modified);
+  when.title = (n.modified || '').replace('T', ' ');
+  nm.appendChild(ex);
+  nm.appendChild(when);
   info.appendChild(nt);
   info.appendChild(nm);
   li.appendChild(info);
@@ -1060,17 +1188,18 @@ function buildNoteItem(n, q) {
       s.textContent = t;
       s.onclick = e => {
         e.stopPropagation();
-        $('search').value = t;
-        refreshList();
+        toggleTagFilter(t);
       };
       lt.appendChild(s);
     }
-    li.appendChild(lt);
+    // 放进 nt-wrap：标签与标题左对齐（nt-wrap 留了复选框的缩进），
+    // 直接挂 li 上会贴着行边，看起来像另一个层级的东西。
+    info.appendChild(lt);
   }
   li.onclick = e => {
-    if (e.ctrlKey || e.metaKey) { e.preventDefault(); toggleSelect(noteKey(n)); renderFilterBar(); syncSelectionDom(); return; }
-    if (e.shiftKey) { e.preventDefault(); selectRangeTo(noteKey(n)); renderFilterBar(); syncSelectionDom(); return; }
-    if (state.selected.size) { state.selected.clear(); syncSelectionDom(); renderFilterBar(); }
+    if (e.ctrlKey || e.metaKey) { e.preventDefault(); toggleSelect(noteKey(n)); refreshSelectionUI(); return; }
+    if (e.shiftKey) { e.preventDefault(); selectRangeTo(noteKey(n)); refreshSelectionUI(); return; }
+    if (state.selected.size) { state.selected.clear(); refreshSelectionUI(); }
     openNote(noteKey(n));
   };
   if (state.current && noteKey(state.current) === noteKey(n)) li.classList.add('active');
@@ -1078,13 +1207,19 @@ function buildNoteItem(n, q) {
   // 拖拽：自定义 MIME 标记内部拖拽，避免把资源管理器拖入的文件误判成笔记移动。
   // 落在同一分组的行上 = 排序；落在别的分组的行上 = 移进那个分组并插到该位置。
   li.addEventListener('dragstart', e => {
+    // 排序方式不是「自定义」时，拖动会静默改掉整个列表的排序规则；
+    // 改成先取消这次拖动、问一句，用户确认后再拖一次。
+    if (!isManualOrder()) {
+      e.preventDefault();
+      askManualOrder();
+      return;
+    }
     // 拖已选中的行时整组带走，否则只带当前行。
     // 收敛选择后必须同步 DOM 与筛选条：否则列表还显示 3 项选中、标签也写着「已选 3 项」，
     // 但 state 里只剩被拖的那一项，下一次批量操作会作用在用户没看到的集合上。
     if (!state.selected.has(noteKey(n))) {
       state.selected = new Set([noteKey(n)]);
-      renderFilterBar();
-      syncSelectionDom();
+      refreshSelectionUI();
     }
     draggingKeys = [...state.selected];
     draggingFolder = null;
@@ -1175,7 +1310,18 @@ function updateRowMeta(meta) {
       nt.appendChild(badge);
     }
   }
-  if (nm) nm.textContent = (meta.modified || '').replace('T', ' ');
+  if (nm) {
+    nm.textContent = '';
+    const ex = document.createElement('span');
+    ex.className = 'ex';
+    ex.textContent = meta.excerpt || '';
+    const when = document.createElement('span');
+    when.className = 'when';
+    when.textContent = relTime(meta.modified);
+    when.title = (meta.modified || '').replace('T', ' ');
+    nm.appendChild(ex);
+    nm.appendChild(when);
+  }
   // 标签胶囊：增删标签后行里必须立刻反映，否则要点一下别处才看得到
   const old = li.querySelector('.lt');
   if (old) old.remove();
@@ -1186,16 +1332,242 @@ function updateRowMeta(meta) {
       const s = document.createElement('span');
       s.className = 'lt-tag';
       s.textContent = t;
-      s.onclick = e => { e.stopPropagation(); $('search').value = t; refreshList(); };
+      s.onclick = e => { e.stopPropagation(); toggleTagFilter(t); };
       lt.appendChild(s);
     }
-    li.appendChild(lt);
+    const wrap = li.querySelector('.nt-wrap');
+    (wrap || li).appendChild(lt);
   }
 }
 function syncSelectionDom() {
   document.querySelectorAll('#note-list li[data-file]').forEach(el => {
-    el.classList.toggle('selected', state.selected.has(el.dataset.file));
+    const on = state.selected.has(el.dataset.file);
+    el.classList.toggle('selected', on);
+    const cb = el.querySelector('.nt-check');
+    if (cb) cb.setAttribute('aria-checked', String(on));
   });
+}
+
+/* 选择状态变化后的统一收尾：行高亮、筛选条、批量操作条三处必须同步，
+   否则会出现"列表显示选了 3 项、批量条写着 2 项"的错位。 */
+function refreshSelectionUI() {
+  syncSelectionDom();
+  renderFilterBar();
+  renderBatchBar();
+}
+
+/* 批量操作条：选中之后才出现，固定在侧栏底部。
+   没有它的时候，用户即使碰巧用 Ctrl+点击选中了多篇，也不知道下一步能做什么。 */
+function renderBatchBar() {
+  const bar = $('batch-bar');
+  if (!bar) return;
+  const n = state.selected.size;
+  bar.hidden = n === 0;
+  $('batch-count').textContent = `已选 ${n} 篇`;
+}
+
+/* 搜索/筛选把当前笔记排除在外时，编辑区顶部给一句提示。
+   否则左边列表没有当前行、右边还在显示这篇笔记，用户会以为筛选坏了。 */
+function updateScopeNote() {
+  const el = $('scope-note');
+  if (!el) return;
+  const q = $('search').value.trim();
+  const filtering = !!(q || state.tagFilter.length || state.folderFilter !== null);
+  const cur = state.current && state.current.file_name;
+  const inList = !!cur && state.notes.some(n => noteKey(n) === cur);
+  if (!filtering || !cur || inList) { el.hidden = true; return; }
+  const title = $('doc-title').value.trim() || '当前笔记';
+  $('scope-note-text').textContent = `「${title}」不在当前筛选结果中`;
+  el.hidden = false;
+}
+
+/* 标签候选：把库里已有的标签喂给 input 的 datalist。
+   没有候选时，同一个标签会被打出好几种写法（大小写、错别字），
+   而标签一旦写错，筛选就永远对不上。 */
+async function refreshTagSuggestions() {
+  const list = $('tag-suggestions');
+  if (!list) return;
+  let tags = [];
+  try { tags = await invoke('list_tags'); } catch { tags = []; }
+  list.innerHTML = '';
+  for (const t of tags || []) {
+    const opt = document.createElement('option');
+    opt.value = t;
+    list.appendChild(opt);
+  }
+}
+
+/* ---------- 标签管理 ----------
+   候选只能降低写错的概率，已经写歪的标签需要批量治理：
+   一个地方看到全部标签与篇数，改名（=合并）、删除都在这里做。 */
+async function openTagManager() {
+  const modal = $('tag-modal');
+  modal.hidden = false;
+  $('tag-modal-filter').value = '';
+  await renderTagManager();
+  $('tag-modal-filter').focus();
+}
+function closeTagManager() {
+  const modal = $('tag-modal');
+  if (modal) modal.hidden = true;
+}
+
+async function renderTagManager() {
+  const list = $('tag-modal-list');
+  if (!list) return;
+  list.textContent = '';
+  let counts = [];
+  try { counts = await invoke('list_tag_counts'); } catch { counts = []; }
+  const q = $('tag-modal-filter').value.trim().toLowerCase();
+  const shown = (counts || []).filter(c => !q || String(c.name).toLowerCase().includes(q));
+  if (!shown.length) {
+    const empty = document.createElement('div');
+    empty.className = 'tag-empty';
+    empty.textContent = (counts && counts.length)
+      ? '没有匹配的标签'
+      : '还没有标签：在笔记的标签框里输入即可创建';
+    list.appendChild(empty);
+    return;
+  }
+  for (const c of shown) {
+    const row = document.createElement('div');
+    row.className = 'tag-row';
+    const name = document.createElement('span');
+    name.className = 'tag-row-name';
+    name.textContent = c.name;
+    name.title = c.name;
+    const cnt = document.createElement('span');
+    cnt.className = 'tag-row-count';
+    cnt.textContent = `${c.count} 篇`;
+    const rename = document.createElement('button');
+    rename.textContent = '改名';
+    rename.title = '改名；改成已有标签即合并';
+    rename.onclick = () => renameTagFlow(c.name);
+    const del = document.createElement('button');
+    del.className = 'danger';
+    del.textContent = '删除';
+    del.title = '从所有笔记里移除这个标签（笔记保留）';
+    del.onclick = () => deleteTagFlow(c.name);
+    row.appendChild(name);
+    row.appendChild(cnt);
+    row.appendChild(rename);
+    row.appendChild(del);
+    list.appendChild(row);
+  }
+}
+
+async function renameTagFlow(from) {
+  const to = await promptInline('重命名标签（改成已有标签即合并）', from);
+  if (!to || to === from) return;
+  try {
+    const n = await invoke('rename_tag', { from, to });
+    notify(`已更新 ${n} 篇笔记的标签`);
+    await afterTagChange();
+  } catch (e) {
+    notify('改名失败：' + e, 'error');
+  }
+}
+
+async function deleteTagFlow(tag) {
+  const ok = await invoke('confirm_dialog', {
+    title: '删除标签',
+    message: `从所有笔记里移除标签「${tag}」？笔记本身不会被删除。`,
+    okLabel: '删除标签',
+    cancelLabel: '取消',
+  });
+  if (!ok) return;
+  try {
+    const n = await invoke('delete_tag', { tag });
+    notify(`已从 ${n} 篇笔记里移除「${tag}」`);
+    await afterTagChange();
+  } catch (e) {
+    notify('删除失败：' + e, 'error');
+  }
+}
+
+/* 标签改完之后：列表、候选、当前笔记的标签框都要跟上。
+   当前笔记若没未保存改动，直接重读一次元数据，避免标签框还显示旧名字。 */
+async function afterTagChange() {
+  await refreshList();
+  refreshTagSuggestions();
+  await syncCurrentTags();
+  if (!$('tag-modal').hidden) await renderTagManager();
+}
+
+async function syncCurrentTags() {
+  if (!state.current || !state.current.file_name || state.dirty) return;
+  try {
+    const n = await invoke('read_note', { fileName: state.current.file_name });
+    state.current.tags = n.tags || [];
+    $('tags-input').value = (n.tags || []).join(', ');
+  } catch { /* 读不到就保持原样，不影响列表 */ }
+}
+
+/* 批量「移动」：在批量条上方弹一个小菜单列出文件夹。
+   复用右键菜单的定位逻辑，但内容只关心目标文件夹。 */
+function openBatchMoveMenu(anchor) {
+  const menu = $('batch-move-menu');
+  if (!menu) return;
+  menu.innerHTML = '';
+  const add = (label, to) => {
+    const d = document.createElement('div');
+    d.className = 'dropdown-item';
+    d.textContent = label;
+    d.onclick = async e => {
+      e.stopPropagation();
+      hideBatchMoveMenu();
+      await moveSelected(to);
+      refreshSelectionUI();
+    };
+    menu.appendChild(d);
+  };
+  add('根目录', '');
+  for (const name of (state.folders || [])) add(name, name);
+  const r = anchor.getBoundingClientRect();
+  menu.hidden = false;
+  const w = menu.offsetWidth, h = menu.offsetHeight;
+  menu.style.left = Math.max(6, Math.min(r.left, window.innerWidth - w - 6)) + 'px';
+  menu.style.top = Math.max(6, r.top - h - 6) + 'px';
+}
+function hideBatchMoveMenu() {
+  const menu = $('batch-move-menu');
+  if (menu) menu.hidden = true;
+}
+
+/* 批量删除：一次确认，逐篇走 delete_note（进回收站），失败的跳过并汇报。 */
+async function deleteSelectedFlow() {
+  const keys = [...state.selected];
+  if (!keys.length) return;
+  const ok = await invoke('confirm_dialog', {
+    title: '删除选中的笔记',
+    message: `确定删除选中的 ${keys.length} 篇笔记？文件会移入 Windows 回收站。`,
+    okLabel: '删除',
+    cancelLabel: '取消',
+  });
+  if (!ok) return;
+  let done = 0, failed = 0, permanent = 0;
+  for (const k of keys) {
+    try {
+      const recycled = await invoke('delete_note', { fileName: k });
+      if (recycled === false) permanent++;
+      done++;
+      if (state.current && state.current.file_name === k) {
+        state.current = null;
+        $('doc-title').value = '';
+        $('tags-input').value = '';
+        $('editor').value = '';
+        renderHighlight();
+        render('');
+        renderPreviewEmptyState(true);
+      }
+    } catch { failed++; }
+  }
+  state.selected.clear();
+  await refreshList();
+  refreshSelectionUI();
+  if (failed) notify('已删除 ' + done + ' 篇，' + failed + ' 篇失败', 'error');
+  else if (permanent) notify('已删除 ' + done + ' 篇（回收站不可用，已永久删除）', 'error');
+  else notify('已删除 ' + done + ' 篇，可从回收站恢复');
 }
 
 const NOTE_MIME = 'application/x-markvault-note';
@@ -1294,8 +1666,22 @@ function ensureManualOrder() {
   LS.set('sort', 'manual');
   const sel = $('sort-select');
   if (sel) sel.value = 'manual';
-  setStatus('已切换为自定义顺序（拖动排序生效）', 'ok');
+  notify('已切换为自定义顺序，可以拖动排序了');
   return true;
+}
+
+/* 非自定义排序下拖动：先解释清楚代价，确认后才切换。
+   原来的做法是拖一下就静默把整个列表的排序规则改掉，用户只是想把笔记挪进文件夹。 */
+async function askManualOrder() {
+  const ok = await invoke('confirm_dialog', {
+    title: '切换为自定义顺序？',
+    message: '拖动排序需要把列表切换为「自定义」顺序，之后新增和修改不会再自动按时间排列。继续？',
+    okLabel: '切换并排序',
+    cancelLabel: '先不拖',
+  });
+  if (!ok) return;
+  ensureManualOrder();
+  await refreshList();
 }
 
 /* 当前 DOM 上某个分组的行顺序。拖动排序以此为基准，而不是以保存过的旧顺序为基准：
@@ -1358,7 +1744,7 @@ async function reorderFolder(fromName, targetName, after) {
   rest.splice(idx, 0, fromName);
   state.order.folders = rest;
   persistOrder();
-  setStatus('已调整文件夹顺序', 'ok');
+  notify('已调整文件夹顺序');
   await refreshList();
 }
 
@@ -1399,17 +1785,18 @@ function buildFolderHeader(name, count, collapsed, selected) {
 
   const ops = document.createElement('div');
   ops.className = 'folder-ops';
-  const mkOp = (title, svg, cls, fn) => {
-    const b = document.createElement('button');
-    b.className = 'nt-op' + (cls ? ' ' + cls : '');
-    b.title = title;
-    b.innerHTML = svg;
-    b.onclick = e => { e.stopPropagation(); fn(); };
-    return b;
+  /* 文件夹操作收进一个「⋯」：原来三个 20px 图标要悬停才出现，
+     既难命中又难分辨。点开后复用右键菜单的文件夹分组，位置跟随按钮。 */
+  const more = document.createElement('button');
+  more.className = 'nt-op folder-more';
+  more.title = '文件夹操作';
+  more.setAttribute('aria-label', '文件夹操作');
+  more.innerHTML = '<svg class="icon" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="19" cy="12" r="1.5"/></svg>';
+  more.onclick = e => {
+    e.stopPropagation();
+    openFolderMenu(name, e.clientX, e.clientY);
   };
-  ops.appendChild(mkOp('在此新建文档', '<svg class="icon" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>', '', () => newNoteInFolder(name)));
-  ops.appendChild(mkOp('重命名文件夹', '<svg class="icon" viewBox="0 0 24 24"><path d="M17 3a2.8 2.8 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5z"/></svg>', '', () => renameFolderFlow(name)));
-  ops.appendChild(mkOp('删除文件夹', '<svg class="icon" viewBox="0 0 24 24"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>', 'danger', () => deleteFolderFlow(name)));
+  ops.appendChild(more);
   li.appendChild(ops);
 
   li.onclick = () => {
@@ -1436,6 +1823,11 @@ function buildFolderHeader(name, count, collapsed, selected) {
 function bindFolderDrag(li, name) {
   li.draggable = true;
   li.addEventListener('dragstart', e => {
+    if (!isManualOrder()) {
+      e.preventDefault();
+      askManualOrder();
+      return;
+    }
     draggingFolder = name;
     draggingKeys = null;
     e.dataTransfer.setData(FOLDER_MIME, name);
@@ -1541,9 +1933,11 @@ function bindDropTarget(el, folder) {
 async function refreshList() {
   const q = $('search').value.trim();
   const sort = LS.get('sort', 'modified');
-  // 一次搜索覆盖标题、正文与标签；文件夹筛选与搜索叠加，后端统一过滤
+  // 一次搜索覆盖标题、正文与标签；文件夹与标签是结构化筛选，与搜索叠加，后端统一过滤。
+  // 标签筛选必须走 tags 参数：塞进 query 会把"正文里恰好出现该词"的笔记也带出来。
   const args = { query: q, sort };
   if (state.folderFilter !== null) args.folder = state.folderFilter;
+  if (state.tagFilter.length) args.tags = state.tagFilter.slice();
   try {
     state.notes = await invoke('search_notes', args);
   } catch {
@@ -1602,7 +1996,7 @@ async function refreshList() {
     else {
       const li = document.createElement('li');
       li.className = 'empty';
-      li.textContent = q ? '没有匹配的笔记' : '点击「新建」写第一篇笔记';
+      li.textContent = q ? '没有匹配的笔记' : '点击「＋ 新建笔记」写第一篇';
       ul.appendChild(li);
     }
     return;
@@ -1646,6 +2040,19 @@ async function refreshList() {
   ul.appendChild(frag);
 }
 
+/* 列表刷新的收尾：批量条、「当前笔记不在结果里」的提示、标签候选都依赖最新列表，
+   统一由这个包装函数处理，避免每个 return 分支都要记得补一行。 */
+const refreshListCore = refreshList;
+let tagSuggestTimer = null;
+refreshList = async function () {
+  await refreshListCore();
+  renderBatchBar();
+  updateScopeNote();
+  // 标签候选不必每次刷新都算：合并到一次延迟，连续保存时只发一次 IPC
+  clearTimeout(tagSuggestTimer);
+  tagSuggestTimer = setTimeout(refreshTagSuggestions, 800);
+};
+
 /* 草稿占位行：点「新建」后立刻可见，不再等 2 秒自动保存才出现条目。
    folder 传入落点文件夹名（'' 表示根目录），在提示里写明，避免用户不知道会存到哪。 */
 function buildDraftItem(title, folder) {
@@ -1688,10 +2095,9 @@ function startInlineRename(li, n) {
       await invoke('rename_note', { fileName: n.file_name, title });
       if (state.current && state.current.file_name === n.file_name) {
         state.current.title = title;
-        $('title-input').value = title;
         $('doc-title').value = title;
       }
-      setStatus('已重命名', 'ok');
+      notify('已重命名');
     } catch (e) {
       setStatus('重命名失败：' + e, 'error');
     }
@@ -1722,7 +2128,6 @@ async function deleteNoteFlow(n) {
       // 之后只要开始输入，beginDraft() 会把它变成一个可自动保存的新草稿——
       // 不能停在「有编辑区但没有 current」的状态，那样敲的字只进内存、永不落盘。
       state.current = null;
-      $('title-input').value = '';
       $('doc-title').value = '';
       $('tags-input').value = '';
       $('editor').value = '';
@@ -1731,8 +2136,7 @@ async function deleteNoteFlow(n) {
         state.rich.setContents([], 'silent');
         state.rich.history.clear();
       }
-      $('header-path').hidden = true;
-      $('header-path').textContent = '';
+      updateHeaderPath(null);
       // 保留用户正在用的文档类型：删掉一篇富文本之后继续打字，理应还是富文本。
       // 统一切回 Markdown 会让输入落到隐藏的 textarea 里，用户看到的是"输入没反应"。
       applyKind(state.kind, false);
@@ -1752,8 +2156,8 @@ async function deleteNoteFlow(n) {
     }
     // 后端在回收站不可用时（网络盘、非 Windows）会退回永久删除。
     // 确认框承诺过「可从回收站恢复」，这里必须如实纠正，否则用户以为还能找回。
-    if (recycled === false) setStatus('已删除（回收站不可用，已永久删除，无法找回）', 'error');
-    else setStatus('已删除，可从系统回收站恢复', 'ok');
+    if (recycled === false) notify('已删除（回收站不可用，已永久删除，无法找回）', 'error');
+    else notify('已删除，可从系统回收站恢复');
   } catch (e) {
     setStatus('删除失败：' + e, 'error');
   }
@@ -1779,13 +2183,28 @@ function hideCtxMenu() {
   $('move-submenu').classList.remove('show');
 }
 
+/* 文件夹行上的「⋯」：复用右键菜单的文件夹分组，位置贴在按钮上。
+   右键菜单本身也保留，两个入口指向同一套动作。 */
+function openFolderMenu(name, x, y) {
+  ctxFolder = name;
+  ctxTarget = null;
+  const noteGroup = document.querySelector('#ctx-menu .ctx-group[data-group="note"]');
+  const folderGroup = document.querySelector('#ctx-menu .ctx-group[data-group="folder"]');
+  noteGroup.hidden = true;
+  folderGroup.hidden = false;
+  folderGroup.querySelector('[data-act="rename-folder"]').hidden = !name;
+  folderGroup.querySelector('[data-act="delete-folder"]').hidden = !name;
+  showCtxMenu(x, y);
+}
+
 /* 「移动到…」二级菜单：列出根目录 + 所有文件夹，标出当前所在位置。
    多选时对整组生效。 */
 function buildMoveSubmenu(currentKey) {
   const sub = $('move-submenu');
   sub.innerHTML = '';
   const cur = folderOfKey(currentKey);
-  const multi = state.selected.size > 1;
+  // 只有「点中的这行本来就在多选集合里」才走批量；否则菜单只作用于这一行。
+  const multi = state.selected.size > 1 && state.selected.has(currentKey);
   const mk = (label, to) => {
     const d = document.createElement('div');
     d.className = 'dropdown-item' + (!multi && to === cur ? ' is-current' : '');
@@ -1813,12 +2232,8 @@ $('note-list').addEventListener('contextmenu', e => {
     ctxFolder = null;
     noteGroup.hidden = false;
     folderGroup.hidden = true;
-    // 右键落在已选中的行上 → 菜单针对整组；否则先把选择收敛到这单独一行
-    if (!state.selected.has(ctxTarget)) {
-      state.selected = new Set([ctxTarget]);
-      syncSelectionDom();
-      renderFilterBar();
-    }
+    // 右键不再改动选择：菜单只针对点中的这一行，除非它本来就在多选集合里。
+    // 原来右键会顺手把行变成「已选 1 项」，用户只是想复制一个路径，却留下了选择态。
     buildMoveSubmenu(ctxTarget);
   } else if (folderHeader) {
     ctxFolder = folderHeader.dataset.folder;
@@ -1882,20 +2297,17 @@ $('note-list').addEventListener('keydown', e => {
     // 空格切换多选，配合 Ctrl+A 全选做纯键盘批量移动
     e.preventDefault();
     toggleSelect(rows[idx].dataset.file);
-    renderFilterBar();
-    syncSelectionDom();
+    refreshSelectionUI();
   }
   else if (e.key.toLowerCase() === 'a' && (e.ctrlKey || e.metaKey)) {
     e.preventDefault();
     state.selected = new Set(state.notes.map(noteKey));
-    renderFilterBar();
-    syncSelectionDom();
+    refreshSelectionUI();
   }
   else if (e.key === 'Escape' && state.selected.size) {
     e.preventDefault();
     state.selected.clear();
-    renderFilterBar();
-    syncSelectionDom();
+    refreshSelectionUI();
   }
   else if ((e.key === 'ArrowLeft' || e.key === 'ArrowRight') && idx >= 0 && rows[idx].classList.contains('folder-header')) {
     e.preventDefault();
@@ -1934,12 +2346,12 @@ document.querySelectorAll('#ctx-menu > .ctx-group > .dropdown-item').forEach(el 
         if (!fileName) return;
         await invoke('copy_note_file', { fileName });
         showToast('已复制文件，可在任意文件夹粘贴出副本');
-        setStatus('已复制文件', 'ok');
+        
       } else if (act === 'copy-path') {
         if (!fileName) return;
         const path = await invoke('copy_note_path', { fileName });
         showToast('已复制路径：' + path);
-        setStatus('已复制路径', 'ok');
+        
       } else if (act === 'reveal') {
         if (!fileName) return;
         await invoke('reveal_note', { fileName });
@@ -1981,7 +2393,7 @@ async function moveNote(key, toFolder) {
     }
     collapsedFolders.delete(toFolder || '');
     saveCollapsed();
-    setStatus('已移动到「' + (toFolder || '根目录') + '」', 'ok');
+    notify('已移动到「' + (toFolder || '根目录') + '」');
   } catch (e) {
     setStatus('移动失败：' + e, 'error');
   }
@@ -2009,7 +2421,18 @@ function newFolderFlow() {
     if (!ok || !name) return;
     try {
       await invoke('create_folder', { name });
-      setStatus('已创建文件夹「' + name + '」', 'ok');
+      notify('已创建文件夹「' + name + '」');
+      await refreshList();
+      // 新文件夹按自定义顺序排在末尾，输入完往往在视口外；
+      // 滚到它并闪一下，用户才知道"建在哪了"。
+      const header = [...document.querySelectorAll('#note-list .folder-header')]
+        .find(el => el.dataset.folder === name);
+      if (header) {
+        header.scrollIntoView({ block: 'nearest' });
+        header.classList.add('just-created');
+        setTimeout(() => header.classList.remove('just-created'), 1600);
+      }
+      return;
     } catch (e) {
       // 后端只回"非法名称"，这里补上具体原因，用户才知道下一步怎么改
       const hint = /[/\\]/.test(name) ? '文件夹不支持嵌套，名称里不能有 / 或 \\'
@@ -2069,7 +2492,7 @@ async function renameFolderFlow(oldName) {
       }
       persistOrder();
     }
-    setStatus('已重命名', 'ok');
+    notify('已重命名');
   } catch (e) {
     setStatus('重命名失败：' + e, 'error');
   }
@@ -2130,7 +2553,7 @@ async function deleteFolderFlow(name) {
     if (state.pendingNewFolder === name) state.pendingNewFolder = '';
     collapsedFolders.delete(name);
     saveCollapsed();
-    setStatus('已删除文件夹', 'ok');
+    notify('已删除文件夹');
   } catch (e) {
     // 磁盘上可能还有非 .md 文件（图片等），前端统计不到，这里解释清楚
     const msg = String(e);
@@ -2195,26 +2618,29 @@ function promptInline(title, initial) {
   });
 }
 
-/* 结构化筛选条：显示当前生效的文件夹筛选与多选计数，可逐个清除 */
+/* 结构化筛选条：显示当前生效的文件夹筛选、标签筛选与多选计数，可逐个清除 */
 function renderFilterBar() {
   const bar = $('filter-bar');
   bar.textContent = '';
   const chips = [];
+  for (const t of state.tagFilter) {
+    chips.push({ label: '#' + t, kind: 'tag', value: t });
+  }
   if (state.folderFilter !== null) {
     chips.push({ label: '文件夹: ' + (state.folderFilter || '根目录'), kind: 'folder', value: state.folderFilter });
-  }
-  if (state.selected.size) {
-    chips.push({ label: `已选 ${state.selected.size} 项`, kind: 'sel', value: '' });
   }
   if (!chips.length) { bar.hidden = true; return; }
   bar.hidden = false;
   for (const c of chips) {
     const chip = document.createElement('span');
-    chip.className = 'filter-chip' + (c.kind === 'sel' ? ' is-sel' : '');
+    chip.className = 'filter-chip' + (c.kind === 'sel' ? ' is-sel' : '') + (c.kind === 'tag' ? ' is-tag' : '');
     chip.textContent = c.label;
     if (c.kind === 'sel') {
       chip.title = '清空选择';
       chip.onclick = () => { state.selected.clear(); refreshList(); };
+    } else if (c.kind === 'tag') {
+      chip.title = '点击移除该标签筛选';
+      chip.onclick = () => toggleTagFilter(c.value);
     } else {
       chip.title = '点击清除该筛选';
       chip.onclick = () => {
@@ -2226,37 +2652,49 @@ function renderFilterBar() {
   }
 }
 
-/* 顶栏显示当前笔记相对路径，点击在资源管理器中定位。未落盘的新笔记隐藏。 */
+/* 当前笔记的相对路径不再占顶栏，改为「更多」菜单里的一项：
+   路径是低频的排查信息，放在菜单里既能看到，也不跟标题抢位置。未落盘的新笔记禁用该项。 */
 function updateHeaderPath(note) {
-  const el = $('header-path');
-  if (!note || !note.file_name) { el.hidden = true; el.textContent = ''; return; }
-  el.hidden = false;
-  el.textContent = note.file_name;
-  el.onclick = async () => {
-    try { await invoke('reveal_note', { fileName: note.file_name }); }
-    catch (e) { setStatus('定位失败：' + e, 'error'); }
-  };
+  const item = document.querySelector('#more-menu .dropdown-item[data-act="reveal"]');
+  const hint = $('more-path');
+  const has = !!(note && note.file_name);
+  if (item) {
+    item.hidden = !has;
+    item.title = has ? '在资源管理器中显示：' + note.file_name : '';
+  }
+  if (hint) hint.textContent = has ? note.file_name : '';
 }
 
-/* 首次运行引导：写进 localStorage，写完第一篇（或手动关掉）后不再出现 */
-function maybeShowFirstRun() {
-  if (LS.get('first_run', '')) return;
+/* 首次运行引导：写进 localStorage，看完或手动关掉后不再自动出现。
+   force=true 时从「更多 → 使用帮助」重新打开。
+   卡片不再压暗全屏：写笔记的人不需要为一页说明先点一次"知道了"。 */
+function maybeShowFirstRun(force) {
+  if (!force && LS.get('first_run', '')) return;
+  if (document.querySelector('.first-run')) return;
   const tip = document.createElement('div');
   tip.className = 'first-run';
   tip.innerHTML = '<div class="first-run-card">' +
-    '<div class="first-run-title">欢迎使用 MarkVault</div>' +
+    '<button type="button" class="first-run-close" title="关闭" aria-label="关闭">✕</button>' +
+    '<div class="first-run-title">MarkVault 可以这样用</div>' +
     '<ol class="first-run-steps">' +
-    '<li>点左上角「＋ 新建」创建第一篇笔记</li>' +
-    '<li>直接打字，内容会自动保存到笔记库</li>' +
-    '<li>用左栏的文件夹按钮给笔记分类，右键笔记可复制 / 移动</li>' +
+    '<li>点左上角「＋ 新建笔记」，或在它的下拉里新建文件夹</li>' +
+    '<li>标题写完按 Enter 直接进正文；内容自动保存</li>' +
+    '<li>点列表里的标签就按标签筛选；点行首复选框可多选</li>' +
+    '<li>「⋯ → 导入本地文档」会把文件复制进笔记库</li>' +
     '</ol>' +
-    '<button type="button" class="first-run-ok primary">知道了</button>' +
+    '<div class="first-run-keys">Ctrl N 新建 · Ctrl F 查找 · Ctrl Alt E 回正文 · F6 收/展列表</div>' +
+    '<button type="button" class="first-run-ok primary">开始写</button>' +
     '</div>';
-  tip.querySelector('.first-run-ok').onclick = () => {
+  const close = () => {
     LS.set('first_run', '1');
     tip.remove();
   };
+  tip.querySelector('.first-run-ok').onclick = close;
+  tip.querySelector('.first-run-close').onclick = close;
   document.body.appendChild(tip);
+}
+function showHelp(force) {
+  maybeShowFirstRun(force !== false);
 }
 
 /* 预览空态：让新用户知道这块区域是干什么的。
@@ -2279,6 +2717,87 @@ function renderPreviewEmptyState(show) {
   }
 }
 
+/* ---------- 最近打开的笔记（Ctrl+Tab） ----------
+   一次只能开一篇是刻意的（单文档模型，不存在多文档状态同步问题），
+   但"在会议记录和周报之间来回切"是每天都会发生的事：每次都要回列表里找。
+   这里存最近 5 篇，Ctrl+Tab 在已保存的笔记之间轮换；切换仍然走 openNote，
+   该保存的保存、该恢复的恢复，不引入第二套文档生命周期。
+   未保存的新草稿不参与：切走它等于让它落盘，与"轮换"的预期不符。 */
+const RECENT_KEY = 'recent';
+const RECENT_MAX = 5;
+function recentList() {
+  let list;
+  try { list = JSON.parse(LS.get(RECENT_KEY, '[]')); } catch { list = []; }
+  if (!Array.isArray(list)) list = [];
+  // 只保留库里还存在的笔记：外部删除/改名后不该还留在轮换里
+  return list.filter(k => typeof k === 'string' && state.notes.some(n => noteKey(n) === k));
+}
+function pushRecent(key) {
+  if (!key) return;
+  const list = recentList().filter(k => k !== key);
+  list.unshift(key);
+  LS.set(RECENT_KEY, JSON.stringify(list.slice(0, RECENT_MAX)));
+}
+function recentOthers() {
+  const cur = state.current ? noteKey(state.current) : '';
+  return recentList().filter(k => k !== cur);
+}
+async function openRecentMenu(anchor) {
+  const others = recentOthers();
+  if (!others.length) { notify('还没有可切换的最近笔记', 'error'); return; }
+  const menu = $('recent-menu');
+  if (!menu) { await openNote(others[0]); return; }
+  menu.innerHTML = '';
+  // 列最近几篇，而不是"按一下换一篇"：换到哪一篇应当是用户挑的。
+  // 每行给标题 + 所在文件夹，同名笔记（周报）在不同文件夹里也能分清。
+  others.slice(0, 5).forEach(key => {
+    const meta = state.notes.find(n => noteKey(n) === key);
+    const d = document.createElement('div');
+    d.className = 'dropdown-item recent-item';
+    const t = document.createElement('span');
+    t.className = 'recent-title';
+    t.textContent = (meta && meta.title) || key.replace(/\.(md|html)$/i, '');
+    d.appendChild(t);
+    const folder = folderOfKey(key);
+    if (folder) {
+      const h = document.createElement('span');
+      h.className = 'df-hint';
+      h.textContent = folder;
+      d.appendChild(h);
+    }
+    d.onclick = async e => {
+      e.stopPropagation();
+      hideRecentMenu();
+      await openNote(key);
+    };
+    menu.appendChild(d);
+  });
+  const btn = anchor || $('btn-tb-more') || $('btn-more');
+  const r = btn.getBoundingClientRect();
+  menu.hidden = false;
+  const w = menu.offsetWidth, h = menu.offsetHeight;
+  menu.style.left = Math.max(6, Math.min(r.right - w, window.innerWidth - w - 6)) + 'px';
+  menu.style.top = Math.min(r.bottom + 6, window.innerHeight - h - 6) + 'px';
+}
+function hideRecentMenu() {
+  const menu = $('recent-menu');
+  if (menu) menu.hidden = true;
+}
+/* Ctrl+Tab / Ctrl+Shift+Tab：在最近列表里前后轮换。
+   Shift 方向要按"最近顺序"反着走，否则两篇笔记之间来回按会在原地打转。 */
+async function cycleRecent(back) {
+  const list = recentList();
+  const cur = state.current ? noteKey(state.current) : '';
+  if (list.length < 2) { notify('还没打开过其他笔记', 'error'); return; }
+  const i = list.indexOf(cur);
+  let next;
+  if (i < 0) next = back ? list[list.length - 1] : list[0];
+  // list 是"最近在前"：当前(0) 的下一项就是上一篇，Ctrl+Tab 往后走一格
+  else next = list[(i + (back ? -1 : 1) + list.length) % list.length];
+  if (next === cur) return;
+  await openNote(next);
+}
+
 /* ---------- 打开/新建 ---------- */
 async function openNote(fileName) {
   if (state.current && state.current.file_name === fileName && !state.dirty) return;
@@ -2295,7 +2814,6 @@ async function openNote(fileName) {
     return;
   }
   state.current = note;
-  $('title-input').value = note.title;
   $('doc-title').value = note.title;
   $('tags-input').value = (note.tags || []).join(', ');
   // 类型由后端按扩展名推出；打开已有笔记时一律锁定
@@ -2326,6 +2844,10 @@ async function openNote(fileName) {
   // 只切当前行的高亮，不重建整表：点一下笔记就重新扫库 + 重建全部行，
   // 在长列表里这本身就是一次可见的卡顿，而列表内容其实一个字都没变。
   syncActiveRow(fileName);
+  // 点开笔记后直接接管输入：否则焦点还停在列表行上，用户接着敲字什么都打不进去。
+  // 仅预览布局下编辑区不可见，此时不抢焦点。
+  if (state.layout !== 'preview') focusEditor({ preventScroll: true });
+  pushRecent(fileName);
 }
 
 async function newNote() {
@@ -2335,7 +2857,6 @@ async function newNote() {
     return;
   }
   state.current = { file_name: '' };
-  $('title-input').value = '';
   $('doc-title').value = '';
   $('tags-input').value = '';
   // 新笔记：类型可自由选择，默认沿用上次选择（首次为 Markdown）
@@ -2352,15 +2873,14 @@ async function newNote() {
     renderHighlight();
     render('');
   }
-  $('header-path').hidden = true;
-  $('header-path').textContent = '';
+  updateHeaderPath(null);
   state.dirty = false;
   document.title = '未命名文档 - MarkVault';
   // 明确告知新笔记会落到哪，避免用户以为"点了新建却什么都没发生"；
   // 左栏同时插入占位条，让"已创建"立刻可见。
   const where = saveFolderForNewNote() || '根目录';
   await refreshList();
-  setStatus('新笔记将保存到「' + where + '」，输入即自动保存', 'ok');
+  setStatus('新笔记将保存到「' + where + '」', 'ok');
   $('doc-title').focus();
 }
 
@@ -2376,6 +2896,8 @@ function setLayout(mode, persist) {
     el.style.color = el.dataset.view === mode ? 'var(--accent)' : '';
     el.style.fontWeight = el.dataset.view === mode ? '600' : '';
   });
+  // 仅编辑模式下不再实时渲染预览；切回带预览的布局时要补一次，否则面板是旧的
+  if (!isRich() && mode !== 'edit' && previewSrc !== $('editor').value) render($('editor').value);
 }
 
 /* ---------- 分隔条拖动 ---------- */
@@ -2384,7 +2906,12 @@ function setLayout(mode, persist) {
   const main = $('main-shell');
   let dragging = false;
   const saved = parseFloat(LS.get('editorWidth', ''));
+  // userWidth = 用户自己拖出来的宽度；窗口放不下时临时让位，放得下再还回去。
+  // 之前是"放不下就夹到 max 并写死"，于是窄窗口拉一次、再拉宽，编辑区就永久停在
+  // 那个被夹小的值上，预览被撑到只剩 320px——布局看着像坏了。
+  let userWidth = saved > 0 ? saved : 0;
   const applyWidth = w => { main.querySelector('.editor-block').style.flex = `0 0 ${w}px`; };
+  const clearWidth = () => { main.querySelector('.editor-block').style.flex = ''; };
   // 预览区有自己的 min-width（320px），编辑区宽度上限必须把这段和两侧 gap 扣掉，
   // 否则拉到最右时预览被挤出 main 之外，右侧内容直接被裁掉看不见。
   const maxFor = () => {
@@ -2394,33 +2921,41 @@ function setLayout(mode, persist) {
     // main 的三个子元素之间有两个 gap，先扣掉它们再扣预览自己的 320px，否则会多出几像素
     return Math.max(240, rect.width - 320 - gap * 2 - resizerW);
   };
-  // 恢复上次宽度：受窗口宽度约束，避免从小窗口拖出的窄宽在大窗口上原样还原
-  if (saved > 0) {
-    const rect = main.getBoundingClientRect();
-    if (rect.width) applyWidth(Math.min(Math.max(saved, 240), maxFor()));
-  }
-  resizer.addEventListener('mousedown', e => { dragging = true; resizer.classList.add('dragging'); document.body.classList.add('resizing'); e.preventDefault(); });
+  const fitWidth = () => {
+    // 单栏（只编辑/只预览/富文本）时没有第二栏要照顾，不做任何固定宽度
+    if (!$('main-shell').classList.contains('layout-both')) { clearWidth(); return; }
+    if (!userWidth) return;
+    if (userWidth <= maxFor()) applyWidth(userWidth);
+    else clearWidth();
+  };
+  resizer.addEventListener('mousedown', e => {
+    dragging = true;
+    resizer.classList.add('dragging');
+    document.body.classList.add('resizing');
+    // 开始拖时先把当前实际宽度固化成起点，避免从"自适应"跳到鼠标位置
+    userWidth = main.querySelector('.editor-block').getBoundingClientRect().width;
+    e.preventDefault();
+  });
   window.addEventListener('mousemove', e => {
     if (!dragging) return;
     const rect = main.getBoundingClientRect();
     const w = Math.min(Math.max(e.clientX - rect.left, 240), maxFor());
     applyWidth(w);
   });
-  // 窗口变窄后原先记住的像素宽度会重新把预览挤出去，按当前宽度重新夹一次
-  window.addEventListener('resize', () => {
-    const ed = main.querySelector('.editor-block');
-    const cur = ed.getBoundingClientRect().width;
-    if (cur > maxFor()) applyWidth(maxFor());
-  });
+  // 窗口宽度变化：只决定"用不用得上这个宽度"，不改写用户的记录值
+  window.addEventListener('resize', fitWidth);
   window.addEventListener('mouseup', () => {
     if (!dragging) return;
     dragging = false;
     resizer.classList.remove('dragging');
     document.body.classList.remove('resizing');
-    // 记住宽度：刷新/重开后保持布局
     const w = main.querySelector('.editor-block').getBoundingClientRect().width;
-    if (w) LS.set('editorWidth', String(Math.round(w)));
+    if (w) { userWidth = Math.round(w); LS.set('editorWidth', String(userWidth)); }
   });
+  // 切布局（双栏↔单栏）后重新判断一次：从单栏切回双栏要把宽度还上
+  document.querySelectorAll('#view-menu-row .dropdown-item, #view-menu-prow .dropdown-item')
+    .forEach(el => el.addEventListener('click', () => setTimeout(fitWidth, 0)));
+  fitWidth();
 })();
 
 /* ---------- 下拉菜单 ---------- */
@@ -2871,33 +3406,258 @@ function openLinkPrompt(cb) {
   };
 }
 
-/* 表格：弹出行×列，生成对齐好的 Markdown 管道表骨架，插到光标处 */
-function insertTable() {
-  promptInline('插入表格（行 x 列，如 3x4）', '3x3').then(spec => {
-    if (!spec) { $('editor').focus(); return; }
-    const m = spec.match(/^\s*(\d+)\s*[x×X*,\s]\s*(\d+)\s*$/);
-    if (!m) { setStatus('表格格式无效，请填「行x列」，如 3x3', 'error'); $('editor').focus(); return; }
-    const rows = Math.max(1, Math.min(30, +m[1]));
-    const cols = Math.max(1, Math.min(12, +m[2]));
-    const head = '| ' + Array.from({ length: cols }, (_, i) => '列' + (i + 1)).join(' | ') + ' |';
-    const sep = '| ' + Array.from({ length: cols }, () => '---').join(' | ') + ' |';
-    const body = Array.from({ length: Math.max(0, rows - 1) }, () =>
-      '| ' + Array.from({ length: cols }, () => '   ').join(' | ') + ' |');
-    const table = [head, sep, ...body].join('\n');
-    const ta = $('editor');
-    // 表格是独立块，不能覆盖已选文字：把插入点收敛到选区末尾，正文原样保留
-    const s = ta.selectionEnd, v = ta.value;
-    const before = v.slice(0, s);
-    const lead = before.length === 0 || before.endsWith('\n\n') ? '' : (before.endsWith('\n') ? '\n' : '\n\n');
-    const after = v.slice(s);
-    const trail = after.length === 0 || after.startsWith('\n') ? '\n' : '\n\n';
-    applyEdit(s, s, lead + table + trail, s + lead.length + 2, s + lead.length + 2);
+/* 表格：8×8 网格拖选行列（P2）。弹一个「行 x 列」的输入框，用户得先在脑子里
+   算好行列再打字，还要记住 3x4 这种格式——一次插入表格要停下来想两件事。
+   网格是所见即所得：鼠标划过就显示「3 × 4」，点一下即插入。 */
+const TABLE_GRID_MAX = 8;
+let tableGridRows = 3, tableGridCols = 3;
+
+function buildTableGrid() {
+  const grid = $('table-grid');
+  if (!grid || grid.children.length) return;
+  for (let r = 1; r <= TABLE_GRID_MAX; r++) {
+    for (let c = 1; c <= TABLE_GRID_MAX; c++) {
+      const cell = document.createElement('button');
+      cell.type = 'button';
+      cell.className = 'table-cell';
+      cell.dataset.r = String(r);
+      cell.dataset.c = String(c);
+      cell.setAttribute('aria-label', `${r} 行 ${c} 列`);
+      grid.appendChild(cell);
+    }
+  }
+  grid.addEventListener('mouseover', e => {
+    const cell = e.target.closest('.table-cell');
+    if (cell) paintTableGrid(+cell.dataset.r, +cell.dataset.c, false);
+  });
+  grid.addEventListener('click', e => {
+    const cell = e.target.closest('.table-cell');
+    if (!cell) return;
+    paintTableGrid(+cell.dataset.r, +cell.dataset.c, false);
+    insertTable(tableGridRows, tableGridCols);
+    closeTablePicker();
+  });
+  grid.addEventListener('keydown', e => {
+    // 方向键移动选择，Enter 落定：网格是 64 个按钮，纯键盘也走得通
+    const dr = e.key === 'ArrowDown' ? 1 : e.key === 'ArrowUp' ? -1 : 0;
+    const dc = e.key === 'ArrowRight' ? 1 : e.key === 'ArrowLeft' ? -1 : 0;
+    if (dr || dc) {
+      e.preventDefault();
+      paintTableGrid(
+        Math.max(1, Math.min(TABLE_GRID_MAX, tableGridRows + dr)),
+        Math.max(1, Math.min(TABLE_GRID_MAX, tableGridCols + dc)), true);
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      insertTable(tableGridRows, tableGridCols);
+      closeTablePicker();
+    }
   });
 }
+/* highlight=true 时把单元格标成"选中"并给出焦点，用于键盘操作 */
+function paintTableGrid(r, c, focus) {
+  tableGridRows = r; tableGridCols = c;
+  const grid = $('table-grid');
+  grid.querySelectorAll('.table-cell').forEach(cell => {
+    const on = +cell.dataset.r <= r && +cell.dataset.c <= c;
+    cell.classList.toggle('on', on);
+    cell.tabIndex = (+cell.dataset.r === r && +cell.dataset.c === c) ? 0 : -1;
+  });
+  $('table-grid-label').textContent = `${r} × ${c}`;
+  if (focus) {
+    const cell = grid.querySelector(`.table-cell[data-r="${r}"][data-c="${c}"]`);
+    if (cell) cell.focus();
+  }
+}
+function openTablePicker() {
+  buildTableGrid();
+  paintTableGrid(3, 3, false);
+  $('table-modal').hidden = false;
+  trapFocus($('table-modal'));
+  // 网格本身接管键盘，焦点放在当前格上而不是「插入」按钮
+  const cell = $('table-grid').querySelector('.table-cell[data-r="3"][data-c="3"]');
+  if (cell) cell.focus();
+}
+function closeTablePicker() {
+  $('table-modal').hidden = true;
+  if ($('editor') && state.layout !== 'preview') focusEditor({ preventScroll: true });
+}
+
+/* 生成对齐好的 Markdown 管道表骨架，插到光标处 */
+function insertTable(rows, cols) {
+  rows = Math.max(1, Math.min(30, rows || 3));
+  cols = Math.max(1, Math.min(12, cols || 3));
+  const head = '| ' + Array.from({ length: cols }, (_, i) => '列' + (i + 1)).join(' | ') + ' |';
+  const sep = '| ' + Array.from({ length: cols }, () => '---').join(' | ') + ' |';
+  const body = Array.from({ length: Math.max(0, rows - 1) }, () =>
+    '| ' + Array.from({ length: cols }, () => '   ').join(' | ') + ' |');
+  const table = [head, sep, ...body].join('\n');
+  const ta = $('editor');
+  // 表格是独立块，不能覆盖已选文字：把插入点收敛到选区末尾，正文原样保留
+  const s = ta.selectionEnd, v = ta.value;
+  const before = v.slice(0, s);
+  const lead = before.length === 0 || before.endsWith('\n\n') ? '' : (before.endsWith('\n') ? '\n' : '\n\n');
+  const after = v.slice(s);
+  const trail = after.length === 0 || after.startsWith('\n') ? '\n' : '\n\n';
+  applyEdit(s, s, lead + table + trail, s + lead.length + 2, s + lead.length + 2);
+  setStatus(`已插入 ${rows} × ${cols} 表格`, 'ok');
+}
+
+/* ---------- 预览里的表格操作（P2）----------
+   插完表格没法改行列，只能回源码里一行一行数竖线——这是最初走查里被点名的坑。
+   现在把光标放进表格，预览浮出「＋行/＋列/−行/−列/删除表格」。
+   表格定位：预览的 table 顺序 ↔ 源码里的管道表块顺序，与任务勾选同一套对齐思路。 */
+function tableBlocksOf(src) {
+  const lines = src.split('\n');
+  const blocks = [];
+  let i = 0;
+  while (i < lines.length) {
+    // 表格块 = 连续一行以上以 | 开头，且第二行是分隔行
+    if (/^\s*\|.*\|\s*$/.test(lines[i]) && i + 1 < lines.length && /^\s*\|[\s:|-]+\|\s*$/.test(lines[i + 1])) {
+      const start = i;
+      while (i < lines.length && /^\s*\|.*\|\s*$/.test(lines[i])) i++;
+      blocks.push({ start, end: i - 1, lines: lines.slice(start, i) });
+    } else i++;
+  }
+  return blocks;
+}
+function splitRow(line) {
+  return line.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map(c => c.trim());
+}
+function renderRow(cells) {
+  return '| ' + cells.join(' | ') + ' |';
+}
+/* 光标所在（或最近一次点击的）表格索引 */
+function tableUnderCaret() {
+  if (isRich()) return -1;
+  const ta = $('editor');
+  if (document.activeElement !== ta) return activeTableIdx;
+  const pos = ta.selectionStart;
+  const blocks = tableBlocksOf(ta.value);
+  let line = 0;
+  for (let i = 0; i < pos && i < ta.value.length; i++) if (ta.value[i] === '\n') line++;
+  for (let k = 0; k < blocks.length; k++) {
+    if (line >= blocks[k].start && line <= blocks[k].end) { activeTableIdx = k; return k; }
+  }
+  return -1;
+}
+function showTableOps(idx) {
+  const bar = $('table-ops');
+  if (!bar) return;
+  activeTableIdx = idx;
+  bar.hidden = idx < 0;
+}
+function hideTableOps() {
+  const bar = $('table-ops');
+  if (bar) bar.hidden = true;
+  activeTableIdx = -1;
+}
+/* 把改动写回源码：只替换表格那几行，前面的正文一个字都不动，
+   撤销栈里也只留一步，不会把整篇重写。 */
+function rewriteTable(idx, newLines) {
+  const ta = $('editor');
+  const blocks = tableBlocksOf(ta.value);
+  const b = blocks[idx];
+  if (!b) return;
+  const lines = ta.value.split('\n');
+  const oldText = lines.slice(b.start, b.end + 1).join('\n');
+  const newText = newLines.join('\n');
+  if (oldText === newText) return;
+  let off = 0;
+  for (let i = 0; i < b.start; i++) off += lines[i].length + 1;
+  applyEdit(off, off + oldText.length, newText, off, off + newText.length);
+  render($('editor').value);
+}
+function tableOp(op) {
+  const idx = activeTableIdx >= 0 ? activeTableIdx : tableUnderCaret();
+  if (idx < 0) { notify('先把光标放进一个表格里', 'error'); return; }
+  const blocks = tableBlocksOf($('editor').value);
+  const b = blocks[idx];
+  if (!b) return;
+  const rows = b.lines.map(splitRow);
+  // 首行是表头，第二行是 --- 分隔行；数据行从第 3 行起
+  const bodyFrom = 2;
+  const cols = Math.max(...rows.map(r => r.length));
+  const norm = r => { const out = r.slice(); while (out.length < cols) out.push('   '); return out; };
+  const pad = cells => { const out = cells.slice(); while (out.length < cols) out.push('   '); return out; };
+  if (op === 'row-add') {
+    const min = Math.min(rows.length, b.lines.length);
+    rows.splice(min, 0, pad([]));
+  } else if (op === 'row-del') {
+    if (rows.length <= bodyFrom + 1) { notify('表格至少保留一行表头和一行数据', 'error'); return; }
+    rows.pop();
+  } else if (op === 'col-add') {
+    const withNew = rows.map((r, i) => pad(norm(r)).concat(i === 1 ? '---' : '   '));
+    rows.length = 0;
+    rows.push(...withNew);
+  } else if (op === 'col-del') {
+    if (cols <= 1) { notify('表格至少保留一列', 'error'); return; }
+    const cut = rows.map(r => norm(r).slice(0, cols - 1));
+    rows.length = 0;
+    rows.push(...cut);
+  } else if (op === 'all-del') {
+    // 整表删除：连同上下的空行一起收拾，避免留下两块空白。
+    // 必须走 applyEdit（execCommand insertText）而不是直接赋值，否则这一步不在
+    // 原生撤销栈里，Ctrl+Z 撤不回来——删表格是最容易点错的操作。
+    const lines = $('editor').value.split('\n');
+    let from = b.start, to = b.end + 1;
+    while (from > 0 && lines[from - 1].trim() === '') from--;
+    while (to < lines.length && lines[to].trim() === '') to++;
+    let off = 0;
+    for (let i = 0; i < from; i++) off += lines[i].length + 1;
+    let len = 0;
+    for (let i = from; i < to; i++) len += lines[i].length + 1;
+    // 末尾多吃掉的那个换行要还回去，否则会把下一段正文顶到上一行
+    if (to >= lines.length) len = Math.max(0, len - 1);
+    applyEdit(off, off + len, '', off, off);
+    render($('editor').value);
+    hideTableOps();
+    setStatus('已删除表格', 'ok');
+    return;
+  }
+  rewriteTable(idx, rows.map(renderRow));
+  setStatus('表格已更新', 'ok');
+}
+$('table-ops').querySelectorAll('button').forEach(btn => {
+  btn.onclick = () => tableOp(btn.dataset.tbl);
+});
+$('table-cancel').onclick = closeTablePicker;
+$('table-ok').onclick = () => { insertTable(tableGridRows, tableGridCols); closeTablePicker(); };
+$('table-modal').addEventListener('click', e => { if (e.target === $('table-modal')) closeTablePicker(); });
+$('table-modal').addEventListener('keydown', e => {
+  if (e.key === 'Escape') { e.preventDefault(); closeTablePicker(); }
+});
+
+/* 光标进出表格时就地更新浮动条：只在真的位于表格里才出现，免得常驻遮住正文。
+   预览里的表格也支持鼠标悬停定位——用户习惯是在预览里看到表格就想改它。 */
+function syncTableOps() {
+  if (isRich() || state.layout === 'edit') { hideTableOps(); return; }
+  showTableOps(tableUnderCaret());
+}
+$('editor').addEventListener('click', syncTableOps);
+$('editor').addEventListener('keyup', e => {
+  // 只关心会移动光标的键，打字不该每次刷新浮动条
+  if (e.key.startsWith('Arrow') || e.key === 'Home' || e.key === 'End' || e.key === 'PageUp' || e.key === 'PageDown') syncTableOps();
+});
+$('preview').addEventListener('mouseover', e => {
+  const t = e.target.closest('table');
+  if (!t) return;
+  const tables = [...$('preview').querySelectorAll('table')];
+  const idx = tables.indexOf(t);
+  if (idx >= 0) showTableOps(idx);
+});
+/* 点预览表格外部、或切走笔记时收起 */
+$('preview').addEventListener('mouseleave', () => { if (document.activeElement !== $('editor')) hideTableOps(); });
 
 /* 插入图片：Tauri WebView2 无原生图片选择，走文件对话框选一个本地图片，
    复制进库内 .assets/ 后插入相对路径引用。 */
 function insertImage() { pickAndSaveImage(true); }
+
+/* 从原文件名得到 alt：去掉扩展名、把 _ 换成空格。alt 固定成「图片」时，
+   图片加载失败或导出成 PDF 只剩一个空框，读者完全不知道那本来是什么。 */
+function imageAltFrom(name) {
+  const base = String(name || '').replace(/\.[^.]+$/, '').replace(/[_-]+/g, ' ').trim();
+  return base ? base.slice(0, 80) : '';
+}
 
 /* 图片约束：与后端 MAX_IMAGE_BYTES 一致，前端先挡住再发，提示文案保持一致 */
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
@@ -2913,7 +3673,8 @@ async function pickAndSaveImage(insert) {
     if (insert) {
       const ta = $('editor');
       const s = ta.selectionStart, e = ta.selectionEnd;
-      const ins = `![图片](${rel})`;
+      // alt 用原文件名（去扩展名）：导出成 PDF 或图挂了时，读者还知道这张图叫什么
+      const ins = `![${imageAltFrom(picked.name) || '图片'}](${rel})`;
       applyEdit(s, e, ins, s + ins.length, s + ins.length);
       setStatus('已插入图片', 'ok');
     }
@@ -2961,7 +3722,9 @@ async function handleImagePaste(e) {
         const rel = await invoke('save_asset', { dataBase64: bytesToBase64(bytes), ext });
         const ta = $('editor');
         const s = ta.selectionStart, e2 = ta.selectionEnd;
-        const ins = `![图片](${rel})`;
+        // 粘贴的截图一般没有文件名，用时间当说明比「图片」有用：事后能认出是哪一张
+        const alt = imageAltFrom(file.name) || ('截图 ' + new Date().toLocaleTimeString());
+        const ins = `![${alt}](${rel})`;
         applyEdit(s, e2, ins, s + ins.length, s + ins.length);
         setStatus('已粘贴图片到 ' + rel, 'ok');
       } catch (err) {
@@ -3016,7 +3779,48 @@ function enhancePreviewHtml() {
     span.textContent = el.textContent;
     el.replaceWith(span);
   });
+  enhanceImageAlt(p);
   enhanceImages(p);
+}
+
+/* 图片说明（alt）：双击预览里的图片即可改。
+   原来 alt 是写死的「图片」，想改就得回源码里找方括号、数第几张图——几乎没人会去改。 */
+function enhanceImageAlt(root) {
+  root.querySelectorAll('img').forEach(img => {
+    img.title = (img.getAttribute('alt') || '') ? '双击修改图片说明' : '双击添加图片说明';
+    img.addEventListener('dblclick', e => {
+      e.preventDefault();
+      const cur = img.getAttribute('alt') || '';
+      // promptInline 的取消和"留空"都返回空串，没法区分；按"留空=不改"处理，
+      // 标题里也照实写清楚。
+      promptInline('图片说明（留空则保持原样）', cur).then(v => {
+        if (!v || v === cur) return;
+        updateImageAlt(img, v);
+      });
+    });
+  });
+}
+
+/* 把预览里这张图的 alt 写回源码：源码里图片引用的顺序 ↔ 预览里 img 的顺序 */
+function updateImageAlt(img, alt) {
+  const ta = $('editor');
+  const src = ta.value;
+  const all = [...$('preview').querySelectorAll('img')];
+  const idx = all.indexOf(img);
+  if (idx < 0) return;
+  const re = /!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g;
+  let m, i = 0;
+  while ((m = re.exec(src)) !== null) {
+    if (i === idx) {
+      const start = m.index, end = m.index + m[0].length;
+      const next = `![${alt}](${m[2]})`;
+      applyEdit(start, end, next, start, start + next.length);
+      render($('editor').value);
+      setStatus('图片说明已更新', 'ok');
+      return;
+    }
+    i++;
+  }
 }
 
 /* 预览里的库内图片：src 是相对路径（.assets/xx.png），WebView2 里 file:// 加载不到，
@@ -3039,7 +3843,10 @@ function enhanceImages(root) {
   });
 }
 
-/* 预览复选框点击 → 找到源码中对应列表行，回写 [x]/[ ] */
+/* 预览复选框点击 → 找到源码中对应列表行，回写 [x]/[ ]
+   只改那一个字符，不再整篇重写：整篇重写会把编辑区滚动位置弹回顶部、把用户停在
+   别处的选区一起清掉，而且一次勾选在撤销栈里变成"替换全文"一步。
+   这里只替换 [ ] 里的 1 个字符，光标与滚动都原地不动。 */
 function toggleTaskItem(li, cb) {
   const ta = $('editor');
   const lines = ta.value.split('\n');
@@ -3056,9 +3863,11 @@ function toggleTaskItem(li, cb) {
     const m = lines[i].match(/^(\s*[-*+]\s+\[)([ xX])(\]\s+.*)$/);
     if (!m) continue;
     if (seen === idx) {
-      lines[i] = m[1] + (cb.checked ? 'x' : ' ') + m[3];
-      const pos = lines.slice(0, i).join('\n').length + (i ? 1 : 0) + m[1].length;
-      applyEdit(0, ta.value.length, lines.join('\n'), pos, pos);
+      // 行首偏移 + 前缀长度 = [x] 里那个字符的位置
+      let off = 0;
+      for (let k = 0; k < i; k++) off += lines[k].length + 1;
+      const at = off + m[1].length;
+      applyEdit(at, at + 1, cb.checked ? 'x' : ' ', at + 1, at + 1);
       return;
     }
     seen++;
@@ -3081,17 +3890,30 @@ function beginDraft() {
   renderPreviewEmptyState(false);
 }
 
+/* 预览只在真的能看见时才渲染：仅编辑模式下右侧面板是隐藏的，
+   每个键都去 marked 解析 + DOMPurify 净化再丢弃，是纯浪费。 */
+function previewVisible() {
+  return !isRich() && state.layout !== 'edit';
+}
+
 function onEditorInput() {
   beginDraft();
   if (!hlRaf) {
     hlRaf = requestAnimationFrame(() => { hlRaf = 0; renderHighlight(); });
   }
+  // 预览解析（marked + DOMPurify + 大纲 + 字数）放到空闲帧：
+  // 打字时的输入延迟优先于"预览早 100ms 出现"。
   clearTimeout(previewTimer);
   const seq = ++renderSeq;
   previewTimer = setTimeout(() => {
-    if (seq !== renderSeq) return; // 期间又有输入，本次已过期
-    render($('editor').value);
-  }, 120);
+    const run = () => {
+      if (seq !== renderSeq) return; // 期间又有输入，本次已过期
+      if (!previewVisible()) return;
+      render($('editor').value);
+    };
+    if (typeof requestIdleCallback === 'function') requestIdleCallback(run, { timeout: 300 });
+    else run();
+  }, 160);
   // 正文变了，查找命中点全部失效：不重跑就会按旧位置选中，跳过去选中的是一段无关文字
   if (!$('find-bar').hidden) { findIdx = -1; runFind(); }
   scheduleAutosave();
@@ -3113,16 +3935,20 @@ async function exportNote(format) {
   const fileName = state.current.file_name;
   // PDF 由 Rust 端 WebView2 原生渲染（无页眉页脚），前端不传内容
   let payload = '';
+  // Word 缺图的提醒要等导出真的成功之后再报——先报再失败，用户会以为图片问题
+  // 才是失败原因。这里先记下，成功分支里和「已导出」合成一条提示。
+  let docxImgWarn = '';
   if (format === 'html') {
     payload = buildStandaloneHtml();
   } else if (format === 'docx') {
     payload = isRich() ? buildDocxPayloadFromHtml() : buildDocxPayload($('editor').value);
     // DOCX 生成器只写文字块，没有图片关系（word/media 与 rels 都没建）。
-    // 与其让用户拿到一份悄悄少了所有截图的 Word，不如当场说清楚。
+    // 与其让用户拿到一份悄悄少了所有截图的 Word，不如当场说清楚——
+    // 但这是"能用、只是缺图"，不是失败：红色报错会让人以为整个导出挂了。
     const imgs = isRich()
       ? (state.rich ? state.rich.root.querySelectorAll('img').length : 0)
       : ($('editor').value.match(/!\[[^\]]*\]\([^)]*\)/g) || []).length;
-    if (imgs) setStatus('提示：Word 导出不含图片，图片请用 HTML 或 PDF 导出', 'error');
+    if (imgs) docxImgWarn = `已导出 Word，但图片没跟过去（本篇 ${imgs} 张）`;
   } else if (format === 'md') {
     payload = $('editor').value;
   } else if (format === 'png') {
@@ -3136,16 +3962,23 @@ async function exportNote(format) {
   }
   try {
     const path = await invoke('export_note', { fileName, format, payload, title: state.current.title || '' });
-    showToast('已导出到 ' + path, { label: '打开所在文件夹', onClick: () => invoke('reveal_path', { path: path.replace(/[\\/][^\\/]*$/, '') }) });
+    if (docxImgWarn) {
+      // 一条提示说清两件事：导出成功 + 图片没跟过去，并给一个能马上点的替代方案
+      setStatus(docxImgWarn, 'warn');
+      showToast(docxImgWarn, { label: '改用 PDF 导出', onClick: () => exportNote('pdf') }, 'warn');
+    } else {
+      showToast('已导出到 ' + path, { label: '打开所在文件夹', onClick: () => invoke('reveal_path', { path: path.replace(/[\\/][^\\/]*$/, '') }) });
+    }
   } catch (e) {
     if (e === '已取消') return;
     setStatus('导出失败：' + e, 'error');
   }
 }
 
-/* 轻量 toast：右下角浮层，带一个可选动作按钮。用于导出/复制这类"一闪就没"的反馈。 */
+/* 轻量 toast：右下角浮层，带一个可选动作按钮。
+   操作成功一律走这里，不再去抢顶栏那行保存状态——那行只回答"存没存"。 */
 let toastTimer = null;
-function showToast(text, action) {
+function showToast(text, action, kind) {
   let el = $('toast');
   if (!el) {
     el = document.createElement('div');
@@ -3154,6 +3987,8 @@ function showToast(text, action) {
     document.body.appendChild(el);
   }
   el.textContent = '';
+  el.classList.toggle('is-error', kind === 'error');
+  el.classList.toggle('is-warn', kind === 'warn');
   const span = document.createElement('span');
   span.className = 'toast-text';
   span.textContent = text;
@@ -3168,7 +4003,12 @@ function showToast(text, action) {
   }
   el.classList.add('show');
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => el.classList.remove('show'), 6000);
+  toastTimer = setTimeout(() => el.classList.remove('show'), kind === 'error' ? 9000 : 6000);
+}
+
+/* 操作反馈统一入口：成功/失败都用 toast，失败停留更久 */
+function notify(text, kind) {
+  showToast(text, null, kind);
 }
 
 /* 富文本导出用的 HTML：图片换成 data URL（导出的文件要能独立打开），并去掉编辑器私有标记。
@@ -3309,10 +4149,8 @@ $('editor').addEventListener('paste', e => { handleImagePaste(e); });
 $('editor').addEventListener('scroll', () => {
   // 行号与高亮随编辑区滚动容器整体移动，无需同步
 });
-/* 标题两处输入（顶栏 + 编辑框）双向同步：改一处即时反映另一处，再触发自动保存 */
-function syncTitle(src) {
-  const other = src === $('doc-title') ? $('title-input') : $('doc-title');
-  if (other.value !== src.value) other.value = src.value;
+/* 标题只有一处（正文上方）。改标题即时刷新草稿行并触发自动保存。 */
+function onTitleInput() {
   syncDraftTitle();
   scheduleAutosave();
 }
@@ -3321,10 +4159,12 @@ function syncDraftTitle() {
   const el = document.querySelector('#note-list li.draft .nt');
   if (el) el.textContent = $('doc-title').value || '未命名文档';
 }
-$('doc-title').addEventListener('input', () => syncTitle($('doc-title')));
-$('title-input').addEventListener('input', () => syncTitle($('title-input')));
+$('doc-title').addEventListener('input', onTitleInput);
+/* 标题按 Enter 直接进正文：这是"写标题 → 开始写"最自然的一步，
+   不必再 Tab 穿过标签、类型、工具栏；同时保留失焦行为给鼠标用户。 */
 $('doc-title').addEventListener('keydown', e => {
-  if (e.key === 'Enter') { e.preventDefault(); $('doc-title').blur(); }
+  if (e.key === 'Enter') { e.preventDefault(); $('doc-title').blur(); focusEditor(); }
+  else if (e.key === 'Escape') { e.preventDefault(); $('doc-title').blur(); }
 });
 $('tags-input').addEventListener('input', scheduleAutosave);
 $('search').addEventListener('input', () => {
@@ -3333,21 +4173,109 @@ $('search').addEventListener('input', () => {
 });
 
 $('btn-new').onclick = newNoteDefault;
-$('btn-new-folder').onclick = newFolderFlow;
-$('btn-save').onclick = doSave;
-/* 打开本地文档：Rust 端弹文件选择框（支持多选），复制进笔记库后打开最后一篇 */
-$('btn-open').onclick = async () => {
+/* 「新建」旁边的下拉：新建文件夹、导入、帮助都收进来。
+   侧栏顶部只留一个主按钮 + 一个箭头，比原来"主按钮 + 纯图标"更容易发现。 */
+bindMenu('btn-new-menu', 'new-menu');
+document.querySelectorAll('#new-menu .dropdown-item').forEach(el => {
+  el.onclick = () => {
+    const act = el.dataset.act;
+    closeAllMenus();
+    if (act === 'new-note') newNoteDefault();
+    else if (act === 'new-folder') newFolderFlow();
+    else if (act === 'import') importLocalDocs();
+    else if (act === 'help') showHelp(true);
+  };
+});
+$('scope-clear').onclick = () => {
+  $('search').value = '';
+  state.tagFilter = [];
+  state.folderFilter = null;
+  refreshList();
+};
+/* 标签管理：入口在排序行右侧，弹窗里改名/合并/删除 */
+$('btn-tags').onclick = openTagManager;
+$('tag-modal-close').onclick = closeTagManager;
+$('tag-modal-filter').addEventListener('input', renderTagManager);
+$('tag-modal').addEventListener('click', e => { if (e.target === $('tag-modal')) closeTagManager(); });
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && $('tag-modal') && !$('tag-modal').hidden) closeTagManager();
+});
+$('batch-bar').querySelectorAll('button').forEach(b => {
+  b.onclick = () => {
+    if (b.dataset.act === 'move') openBatchMoveMenu(b);
+    else if (b.dataset.act === 'delete') deleteSelectedFlow();
+    else {
+      state.selected.clear();
+      refreshSelectionUI();
+    }
+  };
+});
+document.addEventListener('click', e => {
+  if (!e.target.closest('#batch-move-menu') && !e.target.closest('#batch-bar')) hideBatchMoveMenu();
+  if (!e.target.closest('#recent-menu') && !e.target.closest('#btn-more') && !e.target.closest('[data-act="recent"]')) hideRecentMenu();
+});
+/* ===== 窄窗口布局（P2-2）=====
+   tauri.conf.json 的最小宽度就是 900，所以「900 挤压」不是边缘场景。
+   三栏硬塞时每栏只剩 240px 左右，编辑器一行不到 20 个字。
+   处理办法：
+   - ≤1180：侧栏变覆盖式抽屉（不挤压正文），主区优先保证编辑与预览的可读宽度；
+   - ≤1020：默认只显示一栏，用「视图」在编辑/预览间切换（双栏仍可手动选）；
+   - 目录面板改成浮层，不再从正文里切一条走。
+   JS 只负责「宽度变了就重排一次」，样式全在 style.css 的媒体查询里。 */
+let narrowMode = '';
+let layoutBeforeNarrow = '';
+let autoHiddenSidebar = false;
+function layoutForWidth() {
+  const w = window.innerWidth;
+  const mode = w <= 1020 ? 'single' : w <= 1180 ? 'drawer' : '';
+  if (mode === narrowMode) return;
+  const prev = narrowMode;
+  narrowMode = mode;
+  document.body.classList.toggle('is-narrow', mode === 'single');
+  document.body.classList.toggle('is-drawer', mode === 'drawer');
+  // 进单栏：双栏会挤成两条细缝，先收到「编辑」，用户想看预览点一下即可。
+  // 记住原来的布局，窗口拉宽后还回去，别让一次缩放把用户的选择永久改掉。
+  if (mode === 'single' && prev !== 'single' && state.layout === 'both') {
+    layoutBeforeNarrow = 'both';
+    setLayout('edit', false);
+  } else if (!mode && layoutBeforeNarrow) {
+    setLayout(layoutBeforeNarrow);
+    layoutBeforeNarrow = '';
+  }
+  // 抽屉态：侧栏改成浮在正文上，不能默认盖着内容
+  // 直接从宽屏跨过抽屉档掉到 ≤1020 时也要收：单栏下侧栏是整屏浮层，
+  // 不收就等于"一缩放，正文被列表盖住"。
+  if (mode && !prev && state.sidebarOpen) {
+    applySidebar(false);
+    autoHiddenSidebar = true;
+  }
+  // 退回宽屏：把之前为省空间自动收起的侧栏还回来（用户手动收的不动）
+  if (!mode && prev && autoHiddenSidebar) {
+    applySidebar(true);
+    autoHiddenSidebar = false;
+  }
+}
+window.addEventListener('resize', () => { closeAllMenus(); layoutForWidth(); });
+
+$('save-state').onclick = doSave;
+/* 导入本地文档：Rust 端弹多选文件框，复制进笔记库后打开最后一篇。
+   命名用「导入」而不是「打开」：它不会打开原文件，只会在库里留一份副本。 */
+async function importLocalDocs() {
   try {
     const metas = await invoke('import_note', { folder: state.activeFolder || '' });
     if (metas && metas.length) {
-      setStatus(`已导入 ${metas.length} 篇`, 'ok');
       await refreshList();
+      // 先打开再报结果：openNote 会把状态重置成「就绪」，先报会被它盖掉。
       await openNote(metas[metas.length - 1].file_name);
+      showToast(`已导入 ${metas.length} 篇（复制到笔记库，原文件未改动）`, {
+        label: '导入更多',
+        onClick: importLocalDocs,
+      });
     }
   } catch (e) {
-    setStatus('打开失败：' + e, 'error');
+    setStatus('导入失败：' + e, 'error');
   }
-};
+}
 /* 目录/视图移至标签行：仅编辑/双栏时用 row-*；仅预览时编辑行随编辑区隐藏，用预览工具条上的 prow-* */
 $('row-outline').onclick = () => toggleOutline($('row-outline'));
 $('prow-outline').onclick = () => toggleOutline($('prow-outline'));
@@ -3370,9 +4298,28 @@ $('outline-close').onclick = () => {
   $('outline-panel').setAttribute('aria-hidden', 'true');
   LS.set('outline', '0');
 };
-$('btn-theme').onclick = () => applyTheme(document.body.dataset.theme === 'dark' ? 'light' : 'dark');
-
+/* 「更多」菜单承接低频应用级操作：导入、在文件夹中显示、主题。
+   主题曾经是顶栏的一个图标按钮，但换肤不是每天都做的事，收进菜单即可。 */
 bindMenu('btn-export-toggle', 'export-menu');
+bindMenu('btn-more', 'more-menu');
+document.querySelectorAll('#more-menu .dropdown-item').forEach(el => {
+  el.onclick = async () => {
+    const act = el.dataset.act;
+    closeAllMenus();
+    if (act === 'import') importLocalDocs();
+    // 锚点用「更多」按钮本身：菜单项此刻已经被 closeAllMenus 藏起来了，
+    // 拿它算位置只会得到 (0,0)，浮层就跑到左上角去。
+    else if (act === 'recent') openRecentMenu($('btn-more'));
+    else if (act === 'theme') applyTheme(document.body.dataset.theme === 'dark' ? 'light' : 'dark');
+    else if (act === 'to-rich') convertToRich();
+    else if (act === 'help') showHelp(true);
+    else if (act === 'reveal') {
+      if (!state.current || !state.current.file_name) { setStatus('这篇笔记还没保存到磁盘', 'error'); return; }
+      try { await invoke('reveal_note', { fileName: state.current.file_name }); }
+      catch (e) { setStatus('定位失败：' + e, 'error'); }
+    }
+  };
+});
 bindMenu('row-view', 'view-menu-row');
 bindMenu('prow-view', 'view-menu-prow');
 bindMenu('btn-heading', 'heading-menu');
@@ -3413,7 +4360,7 @@ $('kind-switch').querySelectorAll('button').forEach(btn => {
         $('editor').focus();
       }
       state.dirty = false;
-      setStatus('已切换为' + (next === 'rich' ? '富文本' : 'Markdown') + '，输入即自动保存', 'ok');
+      notify('已切换为' + (next === 'rich' ? '富文本' : 'Markdown'));
     };
     if (!hasBody) { go(); return; }
     invoke('confirm_dialog', {
@@ -3443,7 +4390,7 @@ $('btn-inline-code').onclick = formatInlineCode;
 $('btn-codeblock').onclick = insertCodeBlock;
 $('btn-link').onclick = insertLink;
 $('btn-image').onclick = insertImage;
-$('btn-table').onclick = insertTable;
+$('btn-table').onclick = openTablePicker;
 $('btn-tag').onclick = () => insertTag('accent');
 $('btn-hr').onclick = insertHorizontalRule;
 $('btn-undo').onclick = () => { $('editor').focus(); document.execCommand('undo'); };
@@ -3468,7 +4415,7 @@ listen('close-requested', async () => {
 /* 弹窗打开时，全局快捷键必须让路：否则在链接/表格弹窗里按 Ctrl+B，
    格式会施加到背后编辑器里的旧选区上，用户看着弹窗却改了正文。 */
 function anyModalOpen() {
-  return ['link-modal', 'prompt-modal'].some(id => { const el = $(id); return el && !el.hidden; });
+  return ['link-modal', 'prompt-modal', 'table-modal'].some(id => { const el = $(id); return el && !el.hidden; });
 }
 /* 焦点在普通输入框里时，Ctrl+B/I/K/N 这类编辑命令不该抢焦点去编辑器。
    富文本编辑器本身是 contenteditable，但它不是"普通输入框"：它的格式快捷键
@@ -3496,6 +4443,10 @@ document.addEventListener('keydown', e => {
     else if (ctrl && key === 'h') { e.preventDefault(); openFindBar(); $('replace-input').focus(); }
     else if (ctrl && e.shiftKey && key === 't') { e.preventDefault(); applyTheme(document.body.dataset.theme === 'dark' ? 'light' : 'dark'); }
     else if (ctrl && e.shiftKey && key === 'l') { e.preventDefault(); cycleLayout(); }
+    // F6 与 Ctrl+Alt+E 在输入框里也要能用：标签框/搜索框里想回正文时不能先点一下别处
+    else if (e.key === 'F6') { e.preventDefault(); applySidebar(!state.sidebarOpen); }
+    else if (ctrl && e.altKey && key === 'e') { e.preventDefault(); focusEditor(); }
+    else if (ctrl && e.key === 'Tab') { e.preventDefault(); cycleRecent(e.shiftKey); }
     else if (e.key === 'Escape' && !$('find-bar').hidden) { e.preventDefault(); closeFindBar(); }
     return;
   }
@@ -3504,12 +4455,15 @@ document.addEventListener('keydown', e => {
     if (ctrl && e.key.toLowerCase() === 's') { e.preventDefault(); doSave(); }
     else if (ctrl && e.key.toLowerCase() === 'n') { e.preventDefault(); newNoteDefault(); }
     else if (ctrl && e.shiftKey && e.key.toLowerCase() === 't') { e.preventDefault(); applyTheme(document.body.dataset.theme === 'dark' ? 'light' : 'dark'); }
-    // 富文本模式没有源码文本，查找栏无从定位：明说比静默失效好
+    // 富文本也能查找/替换：直接搜 Quill 的纯文本，下标与文档位置一致
     else if (ctrl && (e.key.toLowerCase() === 'f' || e.key.toLowerCase() === 'h')) {
       e.preventDefault();
-      setStatus('富文本模式不支持查找，切到 Markdown 文档可用', 'error');
+      openFindBar();
+      if (e.key.toLowerCase() === 'h') $('replace-input').focus();
     }
     else if (e.key === 'F6') { e.preventDefault(); applySidebar(!state.sidebarOpen); }
+    else if (ctrl && e.altKey && e.key.toLowerCase() === 'e') { e.preventDefault(); focusEditor(); }
+    else if (ctrl && e.key === 'Tab') { e.preventDefault(); cycleRecent(e.shiftKey); }
     else if (e.key === 'Escape') { closeAllMenus(); if (!$('find-bar').hidden) closeFindBar(); }
     return;
   }
@@ -3532,14 +4486,181 @@ document.addEventListener('keydown', e => {
     gotoFindHit(true);
   }
   else if (e.key === 'F6') { e.preventDefault(); applySidebar(!state.sidebarOpen); }
+  // Ctrl+Tab：在最近打开过的笔记之间轮换（Shift 反向）
+  else if (ctrl && e.key === 'Tab') { e.preventDefault(); cycleRecent(e.shiftKey); }
+  // Ctrl+Alt+E：把焦点交给正文。比"数着按几次 Tab"更适合每天写作的人。
+  else if (ctrl && e.altKey && e.key.toLowerCase() === 'e') { e.preventDefault(); focusEditor(); }
   else if (e.key === 'Escape') { closeAllMenus(); if (!$('find-bar').hidden) closeFindBar(); }
 });
 
 /* 焦点不在编辑器时，Ctrl+B/I/K 先聚焦编辑器再执行，避免"按了没反应" */
 function focusEditorThen(fn) {
-  if (document.activeElement !== $('editor')) $('editor').focus();
+  if (!isRich() && document.activeElement !== $('editor')) $('editor').focus();
   fn();
 }
+/* 把当前 Markdown 笔记另存为富文本副本：单向转换，原笔记保留。
+   两种类型不能互转是产品约束，但"先写后排版"是真实需求，给一条单向出口比堵死好。 */
+async function convertToRich() {
+  if (isRich()) { notify('这篇已经是富文本了', 'error'); return; }
+  if (state.dirty && !(await doSave())) return;
+  if (!state.current || !state.current.file_name) { notify('请先保存这篇笔记', 'error'); return; }
+  const md = $('editor').value;
+  const html = DOMPurify.sanitize(marked.parse(md || ''), { ADD_TAGS: ['badges', 'u'], ADD_ATTR: ['tone'] });
+  const title = ($('doc-title').value.trim() || '未命名') + '（富文本）';
+  const folder = folderOfKey(state.current.file_name);
+  const tags = normalizeTags($('tags-input').value.split(/[,，]/));
+  try {
+    const meta = await invoke('save_note', {
+      fileName: '', title, tags, content: html, folder, kind: 'rich',
+    });
+    await refreshList();
+    await openNote(meta.file_name);
+    notify('已另存为富文本副本，原 Markdown 笔记未改动');
+  } catch (e) {
+    notify('转换失败：' + e, 'error');
+  }
+}
+function focusEditor(opts) {
+  const preventScroll = opts && opts.preventScroll;
+  if (isRich()) {
+    const el = document.querySelector('#rich-editor .ql-editor');
+    if (el) el.focus(preventScroll ? { preventScroll: true } : undefined);
+    return;
+  }
+  $('editor').focus(preventScroll ? { preventScroll: true } : undefined);
+}
+
+/* 工具栏是一个整体制表位：18 个按钮不再逐个进 Tab 序，
+   Tab 只停一次（首个按钮），用 ←/→/Home/End 在组内移动。
+   纯键盘用户仍能到达每个按钮，但从标题到正文不再要按 20 多次 Tab。 */
+function initToolbarRoving() {
+  const track = document.querySelector('.format-group-track');
+  if (!track) return;
+  const items = () => [...track.querySelectorAll('button')].filter(b => !b.disabled && b.offsetParent !== null);
+  const setStop = el => {
+    [...track.querySelectorAll('button')].forEach(b => { b.tabIndex = -1; });
+    if (el) el.tabIndex = 0;
+  };
+  const first = items()[0];
+  if (first) setStop(first);
+  track.addEventListener('focusin', e => {
+    const b = e.target.closest && e.target.closest('button');
+    if (b) setStop(b);
+  });
+  track.addEventListener('keydown', e => {
+    if (!['ArrowRight', 'ArrowLeft', 'Home', 'End'].includes(e.key)) return;
+    const list = items();
+    if (!list.length) return;
+    const cur = e.target.closest && e.target.closest('button');
+    const i = list.indexOf(cur);
+    const n = e.key === 'Home' ? 0
+      : e.key === 'End' ? list.length - 1
+        : (i + (e.key === 'ArrowRight' ? 1 : -1) + list.length) % list.length;
+    e.preventDefault();
+    list[n].focus();
+  });
+  // 按钮可能因状态变化被隐藏（富文本切回、禁用撤销等），制表位要跟着校准，
+  // 否则 Tab 会落在一个看不见的按钮上，等于没有入口。
+  const obs = new MutationObserver(() => {
+    const cur = track.querySelector('button[tabindex="0"]');
+    if (cur && cur.offsetParent !== null && !cur.disabled) return;
+    const list = items();
+    if (list.length) setStop(list[0]);
+  });
+  obs.observe(track, { subtree: true, attributes: true, attributeFilter: ['hidden', 'disabled', 'style', 'class'] });
+}
+initToolbarRoving();
+
+/* ---------- 工具栏溢出：单行 + 「更多格式」收纳 ----------
+   原来 18 个按钮里带中文（引用/任务/无序/有序/行内代码/链接/图片/表格/标签/线条），
+   一行放不下就换行，窄窗口还会甩出孤行。现在全部只留图标（title 里有名字），
+   仍然放不下时按 data-tb 优先级把低频项搬进「⋯」，一行永远不换行。
+   data-tb：0 撤销/重做/标题/加粗/斜体，1 列表/链接，2 引用/代码块/图片/表格，
+   3 任务/徽章/分隔线，4 下划线/删除线/行内代码。数字越大越先被收起来。 */
+const toolbarTrack = document.querySelector('.editor-toolbar .format-group-track');
+const toolbarMore = $('tb-more-dropdown');
+const toolbarAll = toolbarTrack ? [...toolbarTrack.children] : [];
+let toolbarBusy = false;
+
+function toolbarLabelOf(el) {
+  const btn = el.matches('button') ? el : el.querySelector('button');
+  return (btn && (btn.dataset.tbLabel || btn.title.split('（')[0].split(' ')[0])) || '';
+}
+/* 搬进「更多」的按钮要带上名字，否则菜单里只剩一个图标，等于没解释 */
+function toolbarToMenu(el) {
+  el.querySelectorAll('.tb-more-label').forEach(n => n.remove());
+  el.classList.add('in-more');
+  if (el.matches('button')) {
+    el.tabIndex = -1;
+    const span = document.createElement('span');
+    span.className = 'tb-more-label';
+    span.textContent = toolbarLabelOf(el);
+    el.appendChild(span);
+  }
+  $('tb-more-menu').appendChild(el);
+}
+function toolbarToTrack(el) {
+  el.querySelectorAll('.tb-more-label').forEach(n => n.remove());
+  el.classList.remove('in-more');
+  if (el.matches('button')) el.removeAttribute('tabindex');
+}
+function tidyToolbarDividers() {
+  const kids = [...toolbarTrack.children];
+  let prevDivider = true; // 行首的分隔符没有意义
+  for (const el of kids) {
+    if (el.classList.contains('divider')) {
+      el.hidden = prevDivider;
+      prevDivider = true;
+    } else {
+      prevDivider = false;
+    }
+  }
+  // 行尾的分隔符同样去掉
+  for (let i = kids.length - 1; i >= 0; i--) {
+    if (!kids[i].classList.contains('divider')) break;
+    if (!kids[i].hidden) { kids[i].hidden = true; break; }
+  }
+}
+function layoutToolbar() {
+  if (!toolbarTrack || !toolbarMore || toolbarBusy) return;
+  toolbarBusy = true;
+  // 1) 全部放回单行，先量一次看是否溢出
+  toolbarMore.hidden = true;
+  for (const el of toolbarAll) toolbarToTrack(el), toolbarTrack.appendChild(el);
+  tidyToolbarDividers();
+  if (toolbarTrack.scrollWidth <= toolbarTrack.clientWidth + 1) { toolbarBusy = false; return; }
+  // 2) 需要「更多」：给它占位后按优先级从低到高搬走，直到装得下
+  toolbarMore.hidden = false;
+  const menu = $('tb-more-menu');
+  menu.innerHTML = '';
+  const idx = el => toolbarAll.indexOf(el);
+  const movable = toolbarAll
+    .filter(el => el.matches('button') && !el.hidden)
+    .sort((a, b) => (+b.dataset.tb || 0) - (+a.dataset.tb || 0) || idx(b) - idx(a));
+  for (const el of movable) {
+    if (toolbarTrack.scrollWidth <= toolbarTrack.clientWidth + 1) break;
+    toolbarToMenu(el);
+    tidyToolbarDividers();
+  }
+  // 菜单内保持原有先后顺序，读起来和工具栏一致
+  [...menu.children].sort((a, b) => idx(a) - idx(b)).forEach(n => menu.appendChild(n));
+  // 一个都没搬走（只是差几像素）时不必显示「更多」
+  if (!menu.children.length) toolbarMore.hidden = true;
+  toolbarBusy = false;
+}
+bindMenu('btn-tb-more', 'tb-more-menu');
+let toolbarResizeTimer = null;
+const scheduleToolbarLayout = () => {
+  clearTimeout(toolbarResizeTimer);
+  toolbarResizeTimer = setTimeout(layoutToolbar, 120);
+};
+window.addEventListener('resize', scheduleToolbarLayout);
+// 窗口宽度没变、工具栏自己变窄也会溢出：收侧栏、切视图（双栏→单栏）都只改主区宽度。
+// 只听 window.resize 会漏掉这些，于是"切到单栏后还有按钮塞在更多里"或者反过来。
+if (window.ResizeObserver) {
+  new ResizeObserver(scheduleToolbarLayout).observe(toolbarTrack);
+}
+layoutToolbar();
 function cycleLayout() {
   const order = ['both', 'edit', 'preview'];
   setLayout(order[(order.indexOf(state.layout) + 1) % order.length]);
@@ -3563,11 +4684,14 @@ function closeFindBar() {
 }
 function runFind() {
   const q = $('find-input').value.toLowerCase();
-  const v = $('editor').value;
+  // 富文本没有 textarea：直接搜 Quill 的纯文本，下标与文档位置一一对应，
+  // 所以跳转/替换都能直接落回富文本，不用另建一套 UI。
+  const v = isRich() ? (state.rich ? state.rich.getText() : '') : $('editor').value;
   findHits = [];
   if (q) {
+    const lower = v.toLowerCase();
     let i = 0;
-    while ((i = v.toLowerCase().indexOf(q, i)) !== -1) { findHits.push([i, i + q.length]); i += q.length; }
+    while ((i = lower.indexOf(q, i)) !== -1) { findHits.push([i, i + q.length]); i += q.length; }
   }
   // 先归一化 findIdx（-1 表示尚未跳转过，按第一条算 1 起显示），再写计数文案
   if (!findHits.length) { findIdx = -1; $('find-count').textContent = '无结果'; return; }
@@ -3644,6 +4768,20 @@ function gotoFindHit(focusEditor) {
   if (!findHits.length) return;
   findIdx = (findIdx + findHits.length) % findHits.length;
   const [s, e] = findHits[findIdx];
+  if (isRich() && state.rich) {
+    const q = state.rich;
+    if (focusEditor) q.setSelection(s, e - s, 'user');
+    // getBounds 给的是相对编辑器的像素位置；命中在视口外才滚动，避免每跳一次整页抖
+    try {
+      const b = q.getBounds(s, e - s);
+      const root = q.root;
+      if (b && (b.top < root.scrollTop + 8 || b.top > root.scrollTop + root.clientHeight - 48)) {
+        root.scrollTop = Math.max(0, b.top - root.clientHeight / 3);
+      }
+    } catch { /* 取不到几何就只选中，不影响替换 */ }
+    $('find-count').textContent = `${findIdx + 1}/${findHits.length}`;
+    return;
+  }
   const ta = $('editor');
   // 仅导航（Enter/前后跳转）时聚焦编辑器；输入过程中的预览不抢焦点，否则选区会吞掉下一个字符
   if (focusEditor) {
@@ -3677,7 +4815,17 @@ function replaceCurrent() {
   const q = $('find-input').value;
   if (!q || !findHits.length) return;
   const [s, e] = findHits[findIdx];
-  applyEdit(s, e, $('replace-input').value, s + $('replace-input').value.length, s + $('replace-input').value.length);
+  const rep = $('replace-input').value;
+  if (isRich() && state.rich) {
+    state.rich.deleteText(s, e - s, 'user');
+    state.rich.insertText(s, rep, 'user');
+    state.rich.setSelection(s + rep.length, 0, 'user');
+    runFind();
+    findIdx++;
+    gotoFindHit(true);
+    return;
+  }
+  applyEdit(s, e, rep, s + rep.length, s + rep.length);
   // 替换后命中位置整体变化，重跑查找并前进到下一处
   runFind();
   findIdx++;
@@ -3687,6 +4835,18 @@ function replaceAll() {
   const q = $('find-input').value;
   const rep = $('replace-input').value;
   if (!q) return;
+  if (isRich() && state.rich) {
+    if (!findHits.length) { notify('没有可替换的匹配', 'error'); return; }
+    const hits = findHits.slice();
+    // 从后往前替换：前面的下标不会被后面的改动挤偏
+    for (let i = hits.length - 1; i >= 0; i--) {
+      state.rich.deleteText(hits[i][0], hits[i][1] - hits[i][0], 'user');
+      state.rich.insertText(hits[i][0], rep, 'user');
+    }
+    notify(`已替换 ${hits.length} 处`);
+    runFind();
+    return;
+  }
   const v = $('editor').value;
   const lc = v.toLowerCase(), lq = q.toLowerCase();
   const out = [];
@@ -3698,11 +4858,11 @@ function replaceAll() {
     i = at + q.length;
     count++;
   }
-  if (!count) { setStatus('没有可替换的匹配', 'ok'); return; }
+  if (!count) { notify('没有可替换的匹配', 'error'); return; }
   const next = out.join('');
   // 整篇一次替换：选中全部内容再插入，保证能被一次 Ctrl+Z 撤销
   applyEdit(0, v.length, next, 0, 0);
-  setStatus(`已替换 ${count} 处`, 'ok');
+  notify(`已替换 ${count} 处`);
   runFind();
 }
 $('replace-one').onclick = replaceCurrent;
@@ -3716,17 +4876,14 @@ $('replace-input').addEventListener('keydown', e => {
 $('replace-input').addEventListener('input', e => e.stopPropagation());
 
 /* ---------- 编辑器 Tab 缩进 ----------
-   正文里 Tab 用于缩进，为免纯键盘被困在 textarea：Ctrl+Tab 移出焦点。 */
+   正文里 Tab 用于缩进，为免纯键盘被困在 textarea：Ctrl+Tab 换到上一篇最近笔记。
+   不把焦点移出编辑器——正文里的 Tab 是缩进，用它做"跳出去"会误伤正在排版的人。
+   Ctrl+Tab 只在这里拦住缩进，真正的切换交给 document 上的全局快捷键：
+   两处都调用会一次按键换两篇（切过去又切回来，看起来完全没反应）。 */
 $('editor').addEventListener('keydown', e => {
   if (isRich()) return; // 富文本模式的键盘行为交给 Quill
   if (e.key === 'Tab' && (e.ctrlKey || e.metaKey)) {
     e.preventDefault();
-    // 按 DOM 顺序走到编辑器之后的下一个可聚焦控件
-    const focusables = [...document.querySelectorAll('button, input, select, textarea, [tabindex]:not([tabindex="-1"])')]
-      .filter(el => !el.disabled && el.offsetParent !== null);
-    const i = focusables.indexOf($('editor'));
-    const next = focusables[i + 1] || focusables[0];
-    if (next) next.focus();
     return;
   }
   if (e.key !== 'Tab') return;
@@ -3778,10 +4935,23 @@ function applySidebar(open) {
   LS.set('sidebar', open ? '1' : '0');
   $('sidebar').classList.toggle('hidden-left', !open);
   $('btn-sidebar').setAttribute('aria-pressed', String(open));
+  // 抽屉态下打开侧栏会盖住正文，给个半透明遮罩提示"点别处会收起"（样式在 .sidebar-shown）
+  document.body.classList.toggle('sidebar-shown', open);
+  // 按钮文字描述「点下去会发生什么」，而不是同时写两个状态；
+  // 收起状态下按钮仍在原位，写着「展开列表」。
+  const label = $('sidebar-toggle-label');
+  if (label) label.textContent = open ? '收起列表' : '展开列表';
+  $('btn-sidebar').title = (open ? '收起' : '展开') + '笔记列表（F6）';
 }
 applySidebar(LS.get('sidebar', '1') === '1');
 $('btn-sidebar').onclick = () => applySidebar(!state.sidebarOpen);
 $('btn-sidebar').setAttribute('aria-pressed', String(state.sidebarOpen));
+/* 抽屉态点遮罩收起：遮罩是 .workspace::after，命中时 event.target 就是 .workspace */
+document.querySelector('.workspace').addEventListener('click', e => {
+  if (!document.body.classList.contains('is-drawer') && !document.body.classList.contains('is-narrow')) return;
+  if (e.target.closest('#sidebar') || e.target.closest('#btn-sidebar')) return;
+  if (state.sidebarOpen) applySidebar(false);
+});
 $('sort-select').value = LS.get('sort', 'modified');
 $('sort-select').onchange = () => { LS.set('sort', $('sort-select').value); refreshList(); };
 state.outlineOpen = LS.get('outline', '0') === '1';
@@ -3813,6 +4983,8 @@ if (state.outlineOpen) {
     // 没有打开任何笔记时，预览区给空态引导，而不是一片空白
     renderPreviewEmptyState(true);
   }
-  setStatus('就绪 · 自动保存已启用');
+  // 顶栏只放一个短状态；"自动保存已启用"写进状态点的 title，不再占一行文字
+  setStatus('就绪');
   maybeShowFirstRun();
+  layoutForWidth();
 })();
