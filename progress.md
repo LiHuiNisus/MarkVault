@@ -1,5 +1,31 @@
 # 当前进度
 
+## 2026-11-01 打包 0.1.7 并重装
+
+空弹框修复（`a52a319`）只改了 `ui/`，而 `ui/` 是打进 `app.exe` 的，必须重新打包才生效，
+所以把 0.1.6 → 0.1.7 再装一次。同号重发会让装过的人分不清手里是新是旧，不能图省事。
+
+- `cargo tauri build` 49s，产出 `MarkVault_0.1.7_x64-setup.exe`（2.50 MiB / 2,618,547 字节）。
+- 入库看是 0.1.5 → 0.1.7：上一次 0.1.6 的版本号改动当时没提交，一直留在工作区，
+  所以这次一并升到 0.1.7（0.1.6 从未单独入库，只存在于装机的那份产物里）。
+- 静默安装 `setup.exe /S`，退出码 0；注册表 `DisplayVersion` 已是 0.1.7，`InstallLocation` 仍为 `D:\MarkVault`。
+- 仓库根 `app.exe` 用本轮 release 产物覆盖，`FileVersion` / `ProductVersion` 均为 0.1.7。
+
+### 装机后核对（CDP 连真机）
+
+- **空弹框已消失**：`#tb-more-dropdown` 的 `hidden` 属性与 `getComputedStyle().display`
+  终于一致（1280 宽下 `true` / `none`，按钮真的不显示），`#tb-more-menu` 子节点 0 个、不弹框。
+  `.dropdown[hidden]` 与 `.dropdown-menu.show:empty` 两条规则确认已进样式表（`cssRules` 里能查到）。
+- **有内容时菜单正常**：把布局切回 `both` 后，1000 宽收 3 项（下划线 / 删除线 / 行内代码，172 × 99.3）、
+  940 与 900 宽收 5 项（+ 标签徽章 / 插入分隔线，172 × 159.3），全部在屏内、无横向滚动。
+- 顶栏「更多」菜单 6 项、高度 189.3，文案不变。
+- 回归：19 篇笔记 19 行、摘要 / 复选框 / 相对时间（`10-11`，`title` 2026-10-11 12:39:39）齐全、
+  行高 66、标签胶囊 2 个、类型徽标 `Markdown`、`#batch-bar` / `#scope-note` / `#save-state` / `#btn-tags` 都在、
+  无 `#title-input`、工具栏 1 行 35px、980 宽进单栏（侧栏 `x=-306`）且拉回 1280 还原 `both`、`errors: []`。
+- 布局 `both` 下 1280 宽时 18 个按钮全在轨道内（15 个 `button` + 3 个 `dropdown` 容器），
+  无一被裁、`elementFromPoint` 全部命中自身；切到 `edit` 单栏（轨道 510 但容器 960）自然收进「更多」。
+- 笔记库未改动：`notes\` 11 个文件、`..\MarkVault` 4 个文件，修改时间仍是 10-17。
+
 ## 2026-11-01 修复「更多格式」空弹框
 
 编辑工具栏右侧的「⋯」在按钮全放得下时（≥1180 宽、或 ≤1100 的单栏/收起侧栏）依然显示，
@@ -741,9 +767,8 @@ $('editor-scroll').scrollTop = Math.max(0, line * lineH - $('editor-scroll').cli
 ## 尚未完成
 
 - P0/P1/P2 全部改动已提交为 `25fedb3`（22 条问题，9 个文件，+2326 −315）。
-- 「更多格式」空弹框的修复（`ui/style.css` + `ui/app.js`）与 0.1.6 版本号三处
-  （`Cargo.toml` / `tauri.conf.json` / `Cargo.lock`）一起入库，即当前 HEAD。
-- **本机已装的 0.1.6 仍是修复前的前端**（`ui/` 打进 `app.exe`，改前端必须重新打包）。
-  要让它生效需要出 0.1.7 再装一次——同号重发会让装过的人分不清手里是新是旧。
-- 仓库根 `app.exe` 已用上一轮 release 覆盖，该文件被 `.gitignore` 忽略，不入库。
+- 「更多格式」空弹框的修复单独提交为 `a52a319`（`ui/style.css` + `ui/app.js` + `progress.md`）。
+- 版本号三处（`Cargo.toml` / `tauri.conf.json` / `Cargo.lock`）此前留在工作区未提交，
+  本轮直接改成 0.1.7 连同打包记录一起提交，0.1.6 从未单独入库。
+- 仓库根 `app.exe` 已用本轮 0.1.7 release 覆盖，该文件被 `.gitignore` 忽略，不入库。
 - 安装包 `src-tauri/target/release/bundle/nsis/` 在 `.gitignore` 覆盖范围内，不入库。
