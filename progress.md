@@ -1,5 +1,48 @@
 # 当前进度
 
+## 2026-11-19 新建格式弹窗 + 新建排最前 + 富文本工具栏扩充
+
+用户提的四条：① 新建时弹框选 Markdown / 富文本；② 新建的笔记排在根目录最前；
+③ 富文本的编辑功能太少，按竞品补常用按钮；④ 自查上述功能并主动修 bug。
+
+### 改了什么
+
+1. **新建格式弹窗**（`ui/index.html` 的 `#new-note-modal` + `ui/app.js` 的 `newNoteKindModal()`）
+   - 入口统一收口到 `newNote()`：侧栏按钮、`Ctrl+N`、新建菜单、文件夹「在此新建文档」都会先弹框。
+   - 默认选中 `mv_kind` 上次用过的类型并挂「上次使用」角标；顶部写明会保存到哪个文件夹。
+   - 键盘：方向键在两选项间切换（radiogroup 语义），回车＝创建，`Esc`＝取消；取消不新建、不清正文、清掉 `pendingNewFolder`。
+   - `anyModalOpen()` 加入该弹窗，弹窗开着时全局快捷键让路。
+2. **新建笔记排最前**（`prependToOrder()` + Rust `sort_metas()`）
+   - 首次落盘时把新键 `unshift` 进 `.markvault-order.json` 对应桶，自定义顺序下立刻最前；
+     新建后强制整表刷新（草稿占位行要换成真实行）。
+   - Rust 三种排序都补 `file_name` 兜底（文件名前缀是创建时间戳），并列项不再每次刷新乱跳。
+3. **富文本工具栏 12 → 20 按钮 + 4 个下拉**
+   - 新增：文字颜色、背景色、对齐、减少/增加缩进、上标/下标、任务列表、插入表格、插入分隔线。
+   - 表格走 Quill 自带 `modules/table`（之前文档里"核心没有表格"的结论是错的，实测 2.0.3 有）；
+     分隔线自注册 `divider` blot（`<hr>`）+ clipboard matcher。
+   - `.ql-toolbar` 改 `flex-wrap: wrap`，900px 最小窗口换行不裁切；补表格边框 / `hr` / 勾选态 / `ql-align-*` 样式。
+
+### 自查时发现并修掉的 bug
+
+- `openNote()` 切类型只清目标侧编辑器：打开富文本后隐藏的 textarea 还留着上一篇 Markdown，
+  导出/字数/查找能读到它；反向亦然。现在两侧都清并清掉 Quill 撤销栈。
+- `newNote()` 同样补成两侧都清；`render('')` 后再 `renderRichWordCount()`，否则富文本字数显示按 Markdown 口径算成 0。
+- `closeTablePicker()` 先把焦点交回编辑器再隐藏弹窗，避免焦点落到 body。
+
+### 验证
+
+- `node --check ui/app.js` 通过；`cargo test` 60 项（39 + 20 + 1）全过；`cargo build --release` 成功，
+  仓库根 `app.exe` 已用新产物覆盖（0.1.7，未升版本号——只是本地源码改动，没出安装包）。
+- harness（8791）：`qa-rich.py`、`rich-e2e.py` 34 项、`rich-e2e2.py` 19 项、`rich-layout.py` 20 项、
+  `rich-link-geometry.py` 41 项、`p2_resp/p2_recent/p2_table/p2_media/p2_scrim` 全绿；
+  新增 `_r7_roundtrip.py`（颜色/对齐/表格/分隔线/待办 落盘重开 15 项全过）、
+  `_r14_switch.py`（md↔rich 互切不串内容）、`_r5_modal.py`（弹窗布局/暗色/键盘）。
+- 真机 CDP（9222，只读 + 一次真实新建后删除）：新建弹窗/落点提示/取消不落盘、富文本 20 按钮无裁切无死按钮、
+  菜单回归、无 JS 报错；真实新建一篇后确认排在根目录第一位并写进顺序表，随后删除并清理顺序表残留键。
+- harness 探针改造：新建要先弹框，18 个脚本的 `#btn-new` 调用统一改为「点开 → 选类型 → 确认」。
+- 与本轮无关的既有失败（改动前后结果一致）：`qa-keys.py` 3 项、`qa-order.py` 3 项、
+  `qa-audit.py` 9 项（HTML5 drag 合成事件在此环境不触发）、`qa-markdown.py` 的 `#btn-save` 陈旧选择器。
+
 ## 2026-11-01 打包 0.1.7 并重装
 
 空弹框修复（`a52a319`）只改了 `ui/`，而 `ui/` 是打进 `app.exe` 的，必须重新打包才生效，

@@ -879,11 +879,23 @@ body[data-theme="dark"] #note-list .lt-tag { color: #b9b0ff; }
 .rich-host .ql-toolbar.ql-snow {
   border: none; border-bottom: 1px solid var(--border); border-radius: 0;
   padding: 6px 12px; background: transparent; flex-shrink: 0;
+  /* 格式多了一倍（对齐/颜色/缩进/上下标/表格/分隔线）：窄窗口下换行，不横向裁切，
+     被裁掉的按钮等于不存在。 */
+  display: flex; flex-wrap: wrap; align-items: center; gap: 2px 0;
 }
-.rich-host .ql-toolbar.ql-snow .ql-formats { margin-right: 10px; }
+.rich-host .ql-toolbar.ql-snow .ql-formats { margin-right: 10px; display: inline-flex; align-items: center; }
 .rich-host .ql-toolbar.ql-snow button { color: var(--toolbar-icon); border-radius: 4px; }
 .rich-host .ql-toolbar.ql-snow button:hover,
 .rich-host .ql-toolbar.ql-snow button.ql-active { color: var(--accent-hover); background: var(--accent-soft); }
+/* 我们自己追加的按钮（表格/分隔线）：与原生按钮同尺寸、同图标风格 */
+.rich-host .ql-toolbar.ql-snow button.ql-ext {
+  float: none; display: inline-flex; align-items: center; justify-content: center;
+  width: 28px; height: 24px; padding: 3px 5px;
+}
+.rich-host .ql-toolbar.ql-snow button.ql-ext svg {
+  width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.8;
+  stroke-linecap: round; stroke-linejoin: round; float: none;
+}
 .rich-host .ql-toolbar.ql-snow .ql-stroke { stroke: currentColor; }
 .rich-host .ql-toolbar.ql-snow .ql-fill { fill: currentColor; }
 .rich-host .ql-toolbar.ql-snow .ql-picker { color: var(--text-secondary); }
@@ -930,6 +942,26 @@ body[data-theme="dark"] #note-list .lt-tag { color: #b9b0ff; }
   line-height: calc(var(--editor-font-size) * var(--editor-line-height));
 }
 .rich-host .ql-editor.ql-blank::before { color: var(--text-muted); font-style: normal; left: 16px; }
+/* 富文本里的表格、分隔线与待办：Quill 的表格不带边框样式（core 只给 td 一条黑边），
+   勾选框是 ql-ui 里的 ☐/☑ 字符，在中文正文里偏小偏淡，这里统一成编辑器风格。 */
+.rich-host .ql-editor table { border-collapse: collapse; width: 100%; margin: 10px 0; table-layout: fixed; }
+.rich-host .ql-editor td {
+  border: 1px solid var(--border); padding: 6px 9px; vertical-align: top;
+  min-width: 40px; word-break: break-word;
+}
+.rich-host .ql-editor td:focus-within, .rich-host .ql-editor td:focus { outline: 2px solid var(--accent-soft); outline-offset: -2px; }
+.rich-host .ql-editor hr {
+  border: none; border-top: 1px solid var(--border); margin: 18px 0;
+}
+.rich-host .ql-editor li[data-list="checked"] { color: var(--text-muted); text-decoration: line-through; }
+.rich-host .ql-editor li[data-list="checked"] > .ql-ui { color: var(--accent); }
+.rich-host .ql-editor li[data-list="unchecked"] > .ql-ui { color: var(--text-secondary); }
+.rich-host .ql-editor li[data-list="checked"] > .ql-ui:before,
+.rich-host .ql-editor li[data-list="unchecked"] > .ql-ui:before { font-size: 1.05em; }
+/* 对齐：Quill 的 ql-align-* 是块级 class，编辑区里必须生效（snow 主题只给 .ql-editor 之外） */
+.rich-host .ql-editor .ql-align-center { text-align: center; }
+.rich-host .ql-editor .ql-align-right { text-align: right; }
+.rich-host .ql-editor .ql-align-justify { text-align: justify; }
 /* 富文本笔记：编辑器自己就是成品，强制单栏并隐藏预览侧 */
 .main.is-rich .preview-block, .main.is-rich .resizer { display: none !important; }
 .main.is-rich .editor-block { flex: 1 1 0 !important; min-width: 0; }
@@ -1120,6 +1152,39 @@ body[data-theme="dark"] #note-list .lt-tag { color: #b9b0ff; }
 .link-modal-actions button.primary:hover { background: var(--accent-hover); }
 .link-modal-actions button.ghost { background: var(--surface); color: var(--text-secondary); }
 .link-modal-actions button.ghost:hover { background: var(--surface-hover); }
+
+/* ===== 新建笔记：格式选择弹窗 ===== */
+.new-note-box { width: 420px; }
+.new-note-desc { margin: -4px 0 12px; font-size: 12px; line-height: 1.6; color: var(--text-muted); }
+.new-note-options { display: flex; flex-direction: column; gap: 8px; }
+.new-note-option {
+  position: relative;
+  display: flex; flex-direction: column; gap: 4px; width: 100%;
+  padding: 11px 13px; text-align: left; cursor: pointer;
+  border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--surface); color: var(--text);
+  transition: border-color .15s, background .15s, box-shadow .15s;
+}
+/* 「上次使用」角标：让默认项的来源可见，用户知道为什么默认选的是它 */
+.nno-tag {
+  position: absolute; top: 9px; right: 10px;
+  padding: 1px 7px; border-radius: 999px;
+  font-size: 10px; font-weight: 600;
+  color: var(--accent); background: var(--panel-bg);
+  border: 1px solid var(--accent);
+}
+.nno-tag[hidden] { display: none; }
+.new-note-option:hover { border-color: var(--accent); background: var(--panel-bg); }
+.new-note-option[aria-checked="true"] {
+  border-color: var(--accent); background: var(--accent-soft);
+  box-shadow: 0 0 0 1px var(--accent) inset;
+}
+.new-note-option:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.nno-head { display: flex; align-items: baseline; gap: 8px; }
+.nno-name { font-size: 13px; font-weight: 600; }
+.nno-ext { font-size: 11px; font-family: var(--font-mono); color: var(--text-muted); }
+.new-note-option[aria-checked="true"] .nno-name { color: var(--accent); }
+.nno-desc { font-size: 11.5px; line-height: 1.55; color: var(--text-secondary); }
 
 /* ===== 表格：8×8 网格选择器 + 预览内表格操作条 ===== */
 .table-modal-box { width: 344px; }

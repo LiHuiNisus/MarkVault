@@ -45,6 +45,8 @@ fn now_stamp() -> String {
 }
 
 /// 同秒重名防覆盖：文件已存在时追加 -2、-3…直到可用。
+/// 文件名格式是 `<创建时间戳>-<标题>.<扩展名>`：时间戳在前，所以按名字排序天然
+/// 是"新建的在前"，排序规则切到「按标题」时同标题的新笔记也不会插进旧笔记中间。
 /// 保留原扩展名：富文本笔记是 .html，不能被改回 .md。
 fn dedup_name(dir: &std::path::Path, name: String) -> String {
     if name.is_empty() || !dir.join(&name).exists() {
@@ -538,9 +540,21 @@ fn list_notes_sorted(dir: Option<std::path::PathBuf>, sort: Option<&str>) -> Vec
 
 fn sort_metas(metas: &mut [NoteMeta], sort: Option<&str>) {
     match sort {
-        Some("created") => metas.sort_by(|a, b| b.created.cmp(&a.created)),
-        Some("title") => metas.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase())),
-        _ => metas.sort_by(|a, b| b.modified.cmp(&a.modified)),
+        // 时间/标题都没法区分先后时，用文件名（前缀是创建时间戳）兜底：
+        // 同一秒建的两篇、同名同修改时间的两篇，也要按"新的在前"稳定下来。
+        // 排序必须稳定，否则每刷新一次列表，并列项的顺序就跳一次。
+        Some("created") => metas.sort_by(|a, b| {
+            b.created.cmp(&a.created).then_with(|| b.file_name.cmp(&a.file_name))
+        }),
+        Some("title") => metas.sort_by(|a, b| {
+            a.title
+                .to_lowercase()
+                .cmp(&b.title.to_lowercase())
+                .then_with(|| b.file_name.cmp(&a.file_name))
+        }),
+        _ => metas.sort_by(|a, b| {
+            b.modified.cmp(&a.modified).then_with(|| b.file_name.cmp(&a.file_name))
+        }),
     }
 }
 

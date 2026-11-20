@@ -14,7 +14,7 @@
 | 类型由**磁盘扩展名**判定，不写进 frontmatter | 文件被重命名/移动后，元数据不会与事实矛盾。`store::kind_of_name()` 是唯一判定处 |
 | `.md` / `.markdown` / `.html` / `.htm` 都算笔记 | 保持对既有 7 篇 `.md` 完全兼容；`.html` 是新增类型 |
 | 富文本编辑器用 **Quill 2.0.3**，vendor 单文件 | 工程无构建步骤（无 package.json），marked/DOMPurify/dom-to-image 都走同一路线。TipTap 要打包器，装不进来 |
-| Quill 2 核心**没有表格模块** | 富文本工具栏不出表格按钮；其余格式全有 |
+| Quill 2 **自带** `modules/table`，只是 snow 主题不给按钮 | 注册 `modules: { table: true }` 后用自建按钮调 `getModule('table').insertTable()`，落盘是 `<table><tbody><tr><td>`，重开可继续编辑 |
 | 富文本模式没有独立预览 | 所见即所得本身就是成品，布局强制单栏，视图切换置灰 |
 | 富文本笔记**不提供「导出 Markdown」和「导出 PNG」** | HTML → Markdown 有损，不给半截结果；PNG 导出截的是 `#preview`，富文本模式没有预览区。导出菜单里这两项隐藏 |
 | 富文本图片：DOM 里存 data URL，落盘换回 `.assets/` 相对路径 | WebView2 加载不到相对路径。**全程字符串替换**，不把 `.assets/` 写进任何 DOM 节点的 src——浏览器会真发请求，离线克隆节点也一样 |
@@ -99,6 +99,47 @@ harness（`tmp-tests/harness/`）已同步：mock 桥支持 `.html`、`kind` 字
 - 没重新构建 `app.exe`（Tauri 把前端嵌进二进制，改前端必须 `cargo build --release`）
 - 没提交（用户未要求）
 - Quill 的撤销栈与 Markdown 模式的 `execCommand` 撤销栈互不相通，这是两个编辑器的固有差异，未做统一
+
+## 2026-11-19 优化：新建格式弹窗 + 排序 + 工具栏扩充
+
+### 1. 新建先选格式（`#new-note-modal`）
+
+类型落盘后不可改，所以选择提前到「建文档之前」：
+
+- 点「＋ 新建笔记」/ `Ctrl+N` / 菜单「新建笔记」/ 文件夹「在此新建文档」，都先弹窗选 Markdown 或富文本。
+- 默认选中上次用过的类型（`localStorage.mv_kind`），挂「上次使用」角标；回车＝用默认值创建，`Esc`/取消＝什么都不变（不新建、不丢当前正文、清掉 `pendingNewFolder`）。
+- 弹窗顶部写明落点（根目录 / 某个文件夹），解决「点新建后不知道会存到哪」。
+- 取消后 `state.current` 保持原样；原先靠标签行那个开关选类型，但那开关在落盘后就隐藏，新用户根本发现不了。
+- 焦点管理复用 `trapFocus()`；`anyModalOpen()` 加入该弹窗，弹窗开着时全局快捷键让路。
+
+### 2. 新建笔记排在分组最前面
+
+- `doSave` 首次落盘时调 `prependToOrder(folder, key)`：把新键 unshift 进 `.markvault-order.json` 对应桶，于是「自定义顺序」下立刻在最前。
+- Rust `sort_metas()` 三种排序都加 `file_name` 兜底（文件名前缀是创建时间戳），并列项不再每次刷新随机跳动；「按修改时间 / 创建时间」下新笔记本来就该在最前。
+
+### 3. 富文本工具栏从 12 项扩到 20 个按钮 + 4 个下拉
+
+新增（对照 Typora / 语雀 / Notion / 飞书常用项）：文字颜色、背景颜色、对齐方式（左/中/右/两端）、
+减少/增加缩进、上标/下标、任务列表（勾选）、插入表格、插入分隔线。
+
+- 表格用 Quill 自带 `modules/table`；分隔线自己注册 `divider` blot（`<hr>`）+ clipboard matcher，粘贴 `<hr>` 不丢。
+- 点击勾选框时 `ql-ui` 只有字形左侧一小块可点（`getBoundingClientRect().width === 0`），已实测确认可用。
+- 工具栏改 `display:flex; flex-wrap:wrap`：900px 最小窗口下换行而不是裁切，实测 900/1100/1280/1600 四档无裁切、无横向滚动、无死按钮。
+- 编辑器内补样式：表格边框、`hr`、勾选态删除线、`ql-align-*`（snow 只在工具栏侧定义过对齐）。
+- 富文本保存/重开：表格、分隔线、对齐、颜色、待办全部原样回来（`tmp-tests/_r7_roundtrip.py` 15 项全过）。
+- 修 `closeTablePicker()`：先还焦点再隐藏弹窗，否则焦点落到 body。
+
+### 4. 顺手修掉的既有问题
+
+- `openNote()` 切换类型时只清了目标侧编辑器：打开富文本笔记后隐藏的 textarea 里还留着上一篇 Markdown 全文，导出/字数/查找会读到它；反向同理。现在两侧都清并清撤销栈。
+- `newNote()` 同样两侧都清；`render('')` 之后补 `renderRichWordCount()`，避免字数按 Markdown 口径显示 0。
+
+### 验证
+
+- `node --check ui/app.js`；`cargo test` 60 项（39 + 20 + 1）全过；`cargo build --release` 成功。
+- harness（8791）：`qa-rich.py` / `rich-e2e.py` 34 / `rich-e2e2.py` 19 / `rich-layout.py` 20 / `p2_*.py` 全绿。
+- 真机 CDP（9222）：新建弹窗、落点提示、两个格式选项、取消不落盘、富文本 20 按钮无裁切无死按钮、菜单回归、无 JS 报错；真实新建一篇后确认排在根目录第一位并写入顺序表，随后删除并清理顺序表残留键。
+- 既有失败与本次无关（改动前后同结果）：`qa-keys.py` 3 项、`qa-order.py` 3 项、`qa-audit.py` 9 项（HTML5 drag 合成事件在该环境不触发）、`qa-markdown.py` 的 `#btn-save` 陈旧选择器。
 
 ## 回归注意
 

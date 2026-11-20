@@ -213,7 +213,7 @@ const RICH_BUTTON_TIPS = {
   'ql-strike': '删除线',
   'ql-blockquote': '引用',
   'ql-code-block': '代码块',
-  'ql-link': '插入链接',
+  'ql-link': '插入链接 Ctrl+K',
   'ql-image': '插入图片（也可直接粘贴截图）',
   'ql-clean': '清除格式',
 };
@@ -222,13 +222,105 @@ const RICH_HEADING_LABELS = {
   4: '标题 4', 5: '标题 5', 6: '标题 6',
 };
 
+/* ---------- 富文本扩展格式 ----------
+   Quill 2 核心给的按钮只有标题/粗斜下删/列表/引用/代码块/链接/图片。竞品（Typora、
+   语雀、Notion、飞书）里最常用的下面这几项它一个都没有，所以在这里补：
+   文字颜色与背景、对齐、列表缩进、上标下标、待办清单、表格、分隔线。
+   表格是 Quill 2 自带的 modules/table，只是 snow 主题不给按钮，注册模块后可以自己接。
+   待办清单也是核心 list blot 的既有能力（data-list=checked/unchecked），
+   只是默认工具栏没暴露；点击勾选由 blot 自己处理。 */
+let richFormatsReady = false;
+const DividerBlotClass = (() => {
+  class DividerBlot extends Quill.import('blots/block/embed') {}
+  DividerBlot.blotName = 'divider';
+  DividerBlot.tagName = 'HR';
+  return DividerBlot;
+})();
+
+function initRichFormats() {
+  if (richFormatsReady) return;
+  richFormatsReady = true;
+  // 分隔线：Quill 没有对应 blot，用 BlockEmbed 挂在 <hr> 上
+  Quill.register(DividerBlotClass);
+  // 剪贴板：HTML → Delta 时把 <hr> 认成分隔线；不注册的话粘贴会直接丢掉它
+  const Delta = Quill.import('delta');
+  Quill.import('modules/clipboard').DEFAULTS.matchers.push(['hr', (node, delta) => new Delta().insert({ divider: true })]);
+}
+
+/* 富文本工具栏。比原来多出：撤销重做（localizeRichToolbar 里插）、对齐、
+   颜色/背景、缩进、上下标、待办、表格、分隔线。表格与分隔线不是 Quill 的
+   工具栏格式（表格只有 modules/table 模块，分隔线是我们自己注册的 blot），
+   由 appendRichExtras() 在 Quill 生成工具栏后追加按钮并绑点击。 */
+const RICH_TOOLBAR_ROWS = [
+  [{ header: [1, 2, 3, 4, 5, 6, false] }],
+  ['bold', 'italic', 'underline', 'strike'],
+  [{ color: [] }, { background: [] }],
+  [{ align: [] }],
+  [{ script: 'sub' }, { script: 'super' }],
+  [{ list: 'ordered' }, { list: 'bullet' }, { list: 'check' }],
+  [{ indent: '-1' }, { indent: '+1' }],
+  ['blockquote', 'code-block', 'link', 'image'],
+  ['clean'],
+];
+
+/* 追加 Quill 工具栏不认识的按钮：表格、分隔线。
+   放在「引用/代码/链接/图片」之后、「清除格式」之前，与 Markdown 工具栏的分组顺序一致。 */
+function appendRichExtras(q) {
+  const bar = document.querySelector('.rich-host .ql-toolbar');
+  if (!bar) return;
+  const mk = (cls, tip, svg, onClick) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'ql-ext ' + cls;
+    b.title = tip;
+    b.setAttribute('aria-label', tip);
+    b.innerHTML = svg;
+    b.addEventListener('mousedown', e => e.preventDefault()); // 别让按钮抢走编辑器选区
+    b.addEventListener('click', e => { e.preventDefault(); onClick(); });
+    return b;
+  };
+  const tableBtn = mk('ql-table', '插入表格',
+    '<svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 10h18M3 15h18M9 4v16"/></svg>',
+    () => openRichTablePicker());
+  const dividerBtn = mk('ql-divider', '插入分隔线',
+    '<svg viewBox="0 0 24 24"><path d="M4 12h16"/></svg>',
+    () => {
+      const range = q.getSelection(true) || { index: q.getLength() - 1, length: 0 };
+      if (range.length) q.deleteText(range.index, range.length, 'user');
+      q.insertEmbed(range.index, 'divider', true, 'user');
+      // 分隔线是块级嵌入：后面补一个空段落，否则光标无处可去，用户接着打字会落在 hr 之前
+      q.insertText(range.index + 1, '\n', 'user');
+      q.setSelection(range.index + 2, 0, 'user');
+      q.focus();
+    });
+  const cleanBtn = bar.querySelector('button.ql-clean');
+  const group = document.createElement('span');
+  group.className = 'ql-formats';
+  group.appendChild(tableBtn);
+  group.appendChild(dividerBtn);
+  if (cleanBtn && cleanBtn.parentElement) cleanBtn.parentElement.parentElement.insertBefore(group, cleanBtn.parentElement);
+  else bar.appendChild(group);
+}
+
+/* 富文本插入表格：Quill 的 table 模块按当前光标插入，行列数由这里决定。
+   复用 Markdown 侧的 8×8 网格选择器，但插入目标是 Quill。 */
+let richTableTarget = null;
+function openRichTablePicker() {
+  richTableTarget = 'rich';
+  openTablePicker();
+}
+
 function localizeRichToolbar() {
   const bar = document.querySelector('.rich-host .ql-toolbar');
   if (!bar) return;
   bar.querySelectorAll('button').forEach(btn => {
     let tip = '';
     if (btn.classList.contains('ql-list')) {
-      tip = btn.value === 'ordered' ? '有序列表' : '无序列表';
+      tip = btn.value === 'ordered' ? '有序列表' : btn.value === 'check' ? '任务列表（待办）' : '无序列表';
+    } else if (btn.classList.contains('ql-indent')) {
+      tip = btn.value === '+1' ? '增加缩进 Tab' : '减少缩进 Shift+Tab';
+    } else if (btn.classList.contains('ql-script')) {
+      tip = btn.value === 'super' ? '上标' : '下标';
     } else {
       Object.keys(RICH_BUTTON_TIPS).forEach(cls => {
         if (btn.classList.contains(cls)) tip = RICH_BUTTON_TIPS[cls];
@@ -238,17 +330,26 @@ function localizeRichToolbar() {
     btn.title = tip;
     btn.setAttribute('aria-label', tip);
   });
-  const picker = bar.querySelector('.ql-picker.ql-header');
-  if (!picker) return;
-  const label = picker.querySelector('.ql-picker-label');
-  if (label) {
-    label.title = '段落样式';
-    label.setAttribute('aria-label', '段落样式');
-  }
-  picker.querySelectorAll('.ql-picker-item').forEach(item => {
-    const name = RICH_HEADING_LABELS[item.dataset.value] || '正文';
-    item.title = name;
-    item.setAttribute('aria-label', name);
+  // 两个下拉（段落样式 / 对齐 / 颜色）都要中文提示：Quill 只在 hover 时出英文 label
+  const pickerTips = [
+    ['ql-header', '段落样式'],
+    ['ql-align', '对齐方式'],
+    ['ql-color', '文字颜色'],
+    ['ql-background', '背景颜色'],
+  ];
+  pickerTips.forEach(([cls, tip]) => {
+    const picker = bar.querySelector('.ql-picker.' + cls);
+    if (!picker) return;
+    const label = picker.querySelector('.ql-picker-label');
+    if (label) {
+      label.title = tip;
+      label.setAttribute('aria-label', tip);
+    }
+    picker.querySelectorAll('.ql-picker-item').forEach(item => {
+      const name = cls === 'ql-header' ? (RICH_HEADING_LABELS[item.dataset.value] || '正文') : tip;
+      item.title = name;
+      item.setAttribute('aria-label', name);
+    });
   });
   /* 撤销/重做按钮：Quill 自己不加这两个按钮（只有快捷键），而 Markdown 工具栏上有。
      只认得按钮的用户在富文本里找不到撤销入口。补两个按钮接管 quill.history。 */
@@ -279,23 +380,21 @@ function localizeRichToolbar() {
   if (linkInput) linkInput.setAttribute('data-link', '粘贴或输入链接地址');
 }
 
-/* 懒创建 Quill。工具栏用 snow 主题的完整格式集，但不含表格——Quill 2 核心没有表格模块。 */
+/* 懒创建 Quill。工具栏是扩展过的完整格式集（见 RICH_TOOLBAR_ROWS）：
+   Quill 2 核心自带表格模块，snow 主题不给按钮，这里自己接上。 */
 function ensureQuill() {
   if (state.rich) return state.rich;
-  const toolbar = [
-    [{ header: [1, 2, 3, 4, 5, 6, false] }],
-    ['bold', 'italic', 'underline', 'strike'],
-    [{ list: 'ordered' }, { list: 'bullet' }],
-    ['blockquote', 'code-block'],
-    ['link', 'image'],
-    ['clean'],
-  ];
+  initRichFormats();
   const q = new Quill('#rich-editor', {
     theme: 'snow',
     placeholder: '开始输入…',
-    modules: { toolbar: { container: toolbar, handlers: { image: richImageHandler } } },
+    modules: {
+      table: true,
+      toolbar: { container: RICH_TOOLBAR_ROWS, handlers: { image: richImageHandler } },
+    },
   });
   localizeRichToolbar();
+  appendRichExtras(q);
   /* Quill 的链接气泡默认按 document.body 夹取边界，而它自己挂在 .ql-container 里，
      容器又是 overflow:hidden。选区靠左时气泡向左溢出容器，左半边直接被裁掉。
      把夹取边界收窄到容器本身，气泡就永远留在容器内。 */
@@ -929,12 +1028,16 @@ async function doSave() {
     ? folderOfKey(state.current.file_name)
     : saveFolderForNewNote();
   try {
+    const isNew = !state.current.file_name;
     const meta = await invoke('save_note', { fileName: state.current.file_name || '', title, tags, content, folder, kind: state.kind });
     state.current = meta;
     // 落盘后类型锁定：扩展名已定，强度上不允许再切
     if (!state.kindLocked) {
       applyKind(meta.kind || state.kind, true);
     }
+    // 新建的笔记排到所在分组最前面（排序方式仍由用户选择，这里只写顺序表：
+    // 自定义顺序下立刻生效，时间/标题排序下不影响它自己的规则）
+    if (isNew && meta.file_name) prependToOrder(meta.folder || '', meta.file_name);
     // 落点已消费：清掉显式指定，避免影响下一次新建
     state.pendingNewFolder = null;
     state.dirty = false;
@@ -945,8 +1048,9 @@ async function doSave() {
     saveError = '';
     setStatus('已保存 ' + new Date().toLocaleTimeString(), 'ok');
     // 保存会刷新 modified：按时间排序时这一条要挪到最前，顺序由整表刷新负责。
-    // 「自定义顺序」下位置不受时间影响，只需更新这一行文字，省掉一次整表重建。
-    if (isManualOrder()) updateRowMeta(meta);
+    // 「自定义顺序」下位置只由上面的 prependToOrder 决定，但新建笔记必须整表刷新，
+    // 否则它还是草稿占位行，左侧列表里看不到真正的条目。
+    if (isManualOrder() && !isNew) updateRowMeta(meta);
     else await refreshList();
     return true;
   } catch (e) {
@@ -963,6 +1067,20 @@ async function doSave() {
     }
     return false;
   }
+}
+
+/* 新建的笔记插到所属分组的最前面。
+   顺序表里没有的键会在 syncOrder 里被追加到末尾——那是给"外部新增/导入"准备的口径，
+   但用户刚点「新建」写下的笔记出现在列表最底部，等于每次新建都要滚到底去找。
+   doSave 拿到 file_name 后立刻把这一条挪到最前并落盘；排序方式为「按修改时间」时
+   本来也会排在前面，这里不改动它，只是让自定义顺序同样合直觉。 */
+function prependToOrder(folder, key) {
+  if (!key) return;
+  const f = folder || '';
+  const list = orderNotes(f).filter(k => k !== key);
+  list.unshift(key);
+  state.order.notes[f] = list;
+  persistOrder();
 }
 
 /* 新笔记的落点文件夹（唯一判定处，doSave、草稿占位行、状态栏提示共用）：
@@ -2820,11 +2938,26 @@ async function openNote(fileName) {
   if (note.kind === 'rich') {
     applyKind('rich', true);
     richLoadHtml(note.content);
+    // 另一侧编辑器（隐藏的 textarea + 预览）还留着上一篇 Markdown：
+    // 不清的话它只是暂时看不见，删掉/切换笔记后旧正文会被当成"当前文档"的一部分
+    // （导出、字数、查找都可能读到它）。
+    $('editor').value = '';
+    renderHighlight();
+    render('');
+    // render('') 会把字数按 Markdown 口径写成 0；富文本要重新按 Quill 正文算一遍
+    renderRichWordCount();
   } else {
     applyKind('md', true);
     $('editor').value = note.content;
     renderHighlight();
     render(note.content);
+    // 同理：富文本编辑器里还留着上一篇的 DOM，清掉并清撤销栈，
+    // 否则在新开的 Markdown 笔记里切回富文本会看到上一篇的内容。
+    if (state.rich) {
+      state.rich.setContents([], 'silent');
+      state.rich.history.clear();
+      state.richAssets.clear();
+    }
   }
   updateHeaderPath(note);
   state.dirty = false;
@@ -2850,29 +2983,114 @@ async function openNote(fileName) {
   pushRecent(fileName);
 }
 
+/* 新建笔记：先问格式。
+   两种格式落盘成不同扩展名（.md / .html），且**创建后不可更改**，
+   所以选择必须发生在建文档之前，而不是建好之后再去点标签行那个开关——
+   那个开关用户根本不知道存在，多半在写完正文才发现选错了类型。 */
+let newNoteKindResolve = null;
+
+function newNoteKindModal() {
+  return new Promise(resolve => {
+    const modal = $('new-note-modal');
+    const opts = [...modal.querySelectorAll('.new-note-option')];
+    const okBtn = $('new-note-ok');
+    // 默认选中上次用过的类型（首次 Markdown）：重复新建同类型笔记时只需一次回车。
+    const lastKind = LS.get('kind', 'md') === 'rich' ? 'rich' : 'md';
+    let picked = lastKind;
+    // 顶部提示带上落点：用户在「文件夹 → 在此新建文档」里点时也能确认会存到哪
+    const hint = modal.querySelector('.new-note-desc');
+    if (hint) {
+      const where = saveFolderForNewNote();
+      hint.textContent = '选择这篇笔记的格式。类型在创建时确定，保存后不能更改。'
+        + (where ? '将保存到「' + where + '」。' : '将保存到根目录。');
+    }
+    const paint = () => opts.forEach(b => {
+      const on = b.dataset.kind === picked;
+      b.setAttribute('aria-checked', String(on));
+      b.tabIndex = on ? 0 : -1;
+      // 「上次使用」角标只挂在默认项（= 上次用过的类型）上；用户改选后不跟着跑，
+      // 否则它描述的就不是"上次"，而成了"当前选中"的同义词。
+      const tag = b.querySelector('[data-default-tag]');
+      if (tag) tag.hidden = b.dataset.kind !== lastKind;
+    });
+    const pick = kind => {
+      picked = kind;
+      paint();
+      if (okBtn) okBtn.textContent = '创建' + (kind === 'rich' ? '富文本' : 'Markdown') + '笔记';
+    };
+    paint();
+    if (okBtn) okBtn.textContent = '创建' + (picked === 'rich' ? '富文本' : 'Markdown') + '笔记';
+    newNoteKindResolve = resolve;
+    modal.hidden = false;
+    trapFocus(modal);
+    const done = ok => {
+      if (!newNoteKindResolve) return;
+      newNoteKindResolve = null;
+      modal.hidden = true;
+      document.removeEventListener('keydown', esc, true);
+      resolve(ok ? picked : '');
+    };
+    const esc = e => {
+      if (e.key === 'Escape') { e.stopPropagation(); done(false); }
+    };
+    document.addEventListener('keydown', esc, true);
+    modal.onclick = e => { if (e.target === modal) done(false); };
+    opts.forEach(b => {
+      b.onclick = () => pick(b.dataset.kind);
+      // 双击直接创建：鼠标用户不必点一次选项再移到右下角点「创建」
+      b.ondblclick = () => { pick(b.dataset.kind); done(true); };
+      // 方向键在单选项之间移动（radiogroup 的键盘约定），Enter 直接创建
+      b.onkeydown = e => {
+        if (e.key === 'ArrowDown' || e.key === 'ArrowRight' || e.key === 'ArrowUp' || e.key === 'ArrowLeft') {
+          e.preventDefault();
+          pick(picked === 'md' ? 'rich' : 'md');
+          const next = opts.find(o => o.dataset.kind === picked);
+          if (next) next.focus();
+        } else if (e.key === 'Enter') {
+          e.preventDefault();
+          done(true);
+        }
+      };
+    });
+    $('new-note-cancel').onclick = () => done(false);
+    okBtn.onclick = () => done(true);
+    // 焦点落在当前选中项上：默认值可见，且 Tab 顺序从选项开始
+    const cur = opts.find(o => o.dataset.kind === picked);
+    if (cur) cur.focus();
+  });
+}
+
 async function newNote() {
   // 同 openNote：保存失败不得清空编辑区，否则未落盘内容直接丢失
   if (state.dirty && !(await doSave())) {
     setStatus('保存失败，已取消新建。请检查笔记文件夹后重试。', 'error');
     return;
   }
+  const kind = await newNoteKindModal();
+  // 取消：保持当前文档原样。之前已经保存过草稿的话，这里什么都不该变。
+  // 同时清掉「在此新建文档」留下的显式落点，否则下次点普通「新建」会莫名落进那个文件夹。
+  if (!kind) {
+    state.pendingNewFolder = null;
+    if (state.layout !== 'preview') focusEditor({ preventScroll: true });
+    return;
+  }
+  LS.set('kind', kind);
   state.current = { file_name: '' };
   $('doc-title').value = '';
   $('tags-input').value = '';
-  // 新笔记：类型可自由选择，默认沿用上次选择（首次为 Markdown）
-  applyKind(LS.get('kind', 'md'), false);
-  if (isRich()) {
-    ensureQuill().setContents([], 'silent');
-    // 必须清撤销栈：setContents 只是换内容，历史还在。不清的话新笔记里按 Ctrl+Z
-    // 会把上一篇的正文整段复活，2 秒后自动保存又把它写成一个新的 .html 文件。
+  // 新笔记：类型由弹窗决定，落盘前锁定开关仍可再切（切了会清空正文）
+  applyKind(kind, false);
+  // 两个编辑器都清空：弹窗里可能选的是另一种格式，另一侧编辑器里还留着上一篇的 DOM。
+  // 不清的话它只是被隐藏着，一旦用户在新笔记里切回那个类型，旧正文会整段复活。
+  if (state.rich) {
+    state.rich.setContents([], 'silent');
     state.rich.history.clear();
     state.richAssets.clear();
-    renderRichWordCount();
-  } else {
-    $('editor').value = '';
-    renderHighlight();
-    render('');
   }
+  $('editor').value = '';
+  renderHighlight();
+  render('');
+  if (isRich()) renderRichWordCount();
   updateHeaderPath(null);
   state.dirty = false;
   document.title = '未命名文档 - MarkVault';
@@ -3482,14 +3700,29 @@ function openTablePicker() {
   if (cell) cell.focus();
 }
 function closeTablePicker() {
+  const target = richTableTarget;
+  richTableTarget = null;
+  // 先交回焦点再隐藏弹窗：焦点先在弹窗内的按钮上，隐藏后焦点落到 body，
+  // 后续按键（尤其是 Esc / Tab）会打到整页而不是编辑器。
+  if (target === 'rich') {
+    const el = document.querySelector('#rich-editor .ql-editor');
+    if (el) el.focus({ preventScroll: true });
+  } else if ($('editor') && state.layout !== 'preview') {
+    focusEditor({ preventScroll: true });
+  }
   $('table-modal').hidden = true;
-  if ($('editor') && state.layout !== 'preview') focusEditor({ preventScroll: true });
 }
 
-/* 生成对齐好的 Markdown 管道表骨架，插到光标处 */
+/* 生成对齐好的 Markdown 管道表骨架，插到光标处。
+   富文本模式走 Quill 的 table 模块：它按块插入带边框的真表格，
+   而不是把管道符写进 HTML 里（那在富文本里就是一段带竖线的普通文字）。 */
 function insertTable(rows, cols) {
   rows = Math.max(1, Math.min(30, rows || 3));
   cols = Math.max(1, Math.min(12, cols || 3));
+  if (isRich()) {
+    insertRichTable(rows, cols);
+    return;
+  }
   const head = '| ' + Array.from({ length: cols }, (_, i) => '列' + (i + 1)).join(' | ') + ' |';
   const sep = '| ' + Array.from({ length: cols }, () => '---').join(' | ') + ' |';
   const body = Array.from({ length: Math.max(0, rows - 1) }, () =>
@@ -3503,6 +3736,22 @@ function insertTable(rows, cols) {
   const after = v.slice(s);
   const trail = after.length === 0 || after.startsWith('\n') ? '\n' : '\n\n';
   applyEdit(s, s, lead + table + trail, s + lead.length + 2, s + lead.length + 2);
+  setStatus(`已插入 ${rows} × ${cols} 表格`, 'ok');
+}
+
+/* 富文本插入表格：Quill 的 table 模块按当前选区插入。
+   网格选择器上限 8 列，这里仍按 30 行 / 12 列兜底，与 Markdown 侧同一套参数。 */
+function insertRichTable(rows, cols) {
+  const q = state.rich;
+  if (!q) return;
+  const table = q.getModule('table');
+  if (!table) { setStatus('表格模块未加载，无法插入表格', 'error'); return; }
+  // 表格是块级结构，插在行内会把当前段落截断：先确保光标在一个空段落里
+  const range = q.getSelection(true);
+  if (!range) { q.focus(); return; }
+  if (range.length) q.deleteText(range.index, range.length, 'user');
+  table.insertTable(rows, cols);
+  q.focus();
   setStatus(`已插入 ${rows} × ${cols} 表格`, 'ok');
 }
 
@@ -4419,7 +4668,7 @@ listen('close-requested', async () => {
 /* 弹窗打开时，全局快捷键必须让路：否则在链接/表格弹窗里按 Ctrl+B，
    格式会施加到背后编辑器里的旧选区上，用户看着弹窗却改了正文。 */
 function anyModalOpen() {
-  return ['link-modal', 'prompt-modal', 'table-modal'].some(id => { const el = $(id); return el && !el.hidden; });
+  return ['new-note-modal', 'link-modal', 'prompt-modal', 'table-modal'].some(id => { const el = $(id); return el && !el.hidden; });
 }
 /* 焦点在普通输入框里时，Ctrl+B/I/K/N 这类编辑命令不该抢焦点去编辑器。
    富文本编辑器本身是 contenteditable，但它不是"普通输入框"：它的格式快捷键

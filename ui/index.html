@@ -309,6 +309,35 @@
     </div>
   </div>
 
+  <div id="new-note-modal" class="link-modal" hidden>
+    <div class="link-modal-box new-note-box" role="dialog" aria-modal="true" aria-labelledby="new-note-title">
+      <div class="link-modal-title" id="new-note-title">新建笔记</div>
+      <p class="new-note-desc">选择这篇笔记的格式。类型在创建时确定，保存后不能更改。</p>
+      <div class="new-note-options" id="new-note-options" role="radiogroup" aria-label="笔记格式">
+        <button type="button" class="new-note-option" data-kind="md" role="radio" aria-checked="true" tabindex="0">
+          <span class="nno-head">
+            <span class="nno-name">Markdown</span>
+            <span class="nno-ext">.md</span>
+          </span>
+          <span class="nno-desc">源码 + 实时预览，纯文本文件，任何编辑器都能打开</span>
+          <span class="nno-tag" data-default-tag>上次使用</span>
+        </button>
+        <button type="button" class="new-note-option" data-kind="rich" role="radio" aria-checked="false" tabindex="-1">
+          <span class="nno-head">
+            <span class="nno-name">富文本</span>
+            <span class="nno-ext">.html</span>
+          </span>
+          <span class="nno-desc">所见即所得，像 Word 一样直接排版图文</span>
+          <span class="nno-tag" data-default-tag hidden>上次使用</span>
+        </button>
+      </div>
+      <div class="link-modal-actions">
+        <button id="new-note-cancel" class="ghost">取消</button>
+        <button id="new-note-ok" class="primary">创建</button>
+      </div>
+    </div>
+  </div>
+
   <div id="link-modal" class="link-modal" hidden>
     <div class="link-modal-box">
       <div class="link-modal-title">插入链接</div>
