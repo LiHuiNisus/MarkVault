@@ -1,5 +1,36 @@
 # 当前进度
 
+## 2026-11-20 打包 0.1.8 并重装
+
+功能改动（`79b4307`）只改了 `ui/` 与一处 Rust 排序，不改 `Cargo.toml` 的话装出来的还是
+0.1.7 的壳、看不到新界面；同号重发又会让人分不清手里是新是旧，所以升到 0.1.8 再装一次。
+
+- `Cargo.toml` / `tauri.conf.json` / `Cargo.lock` 版本号 0.1.7 → 0.1.8。
+  注意：这三个文件**不能用 PowerShell 的 `Set-Content -Encoding utf8` 改**——那会写入 BOM
+  （实测首字节变成 `EF BB BF`），`Cargo.toml` 带 BOM 时 `[package]` 解析会出问题。
+  这次用 Python 按字节读 UTF-8、正则替换后原样写回，diff 只有版本号一行，无 BOM、无 CRLF 变动。
+- `cargo tauri build` 1m58s，产出 `MarkVault_0.1.8_x64-setup.exe`
+  （2.51 MiB / 2,630,088 字节）。NSIS 会对 release 产物再补一次 bundle 类型信息，
+  打包后重新把 `target/release/app.exe` 复制回仓库根 `app.exe`，两边 `FileVersion` 均为 0.1.8。
+- 静默安装覆盖 `D:\MarkVault`（`setup.exe /S`，退出码 0）；注册表 `DisplayVersion` 已是 0.1.8，
+  `InstallLocation` 仍是 `"D:\MarkVault"`。
+
+### 装机后核对（CDP 连装好的 0.1.8）
+
+- WebView2 子进程命令行里 `--webview-exe-version=0.1.8`，确认跑的是新装的这份。
+- 新建弹窗：能打开、两个格式选项、默认项只有一个「上次使用」角标、顶部写明落点，
+  取消后列表行数不变（不落盘）。
+- 富文本工具栏：20 个按钮 + 4 个下拉（段落样式 / 颜色 / 背景 / 对齐），表格与分隔线按钮各 1 个，
+  无被裁切、无点不到的按钮，正文区仍高 574。
+- 真机插入分隔线成功、撤销后恢复，重新载入该笔记 `hr` / `table` 数量与插入前一致（未污染用户笔记）。
+- 真实新建一篇 Markdown：排在根目录第一位，切「自定义顺序」仍在第一位；随后经原生确认框
+  （后台线程点「删除」按钮）删除该临时笔记，行数回到 28，笔记库仍是 11 篇 md + 6 篇 html。
+
+### 未做
+
+- 未提交 0.1.8 的版本号与本轮记录（下一步单独提交）。
+- `set-...` 之外的打包产物（`target/`、`app.exe`、安装包）按 `.gitignore` 不入库。
+
 ## 2026-11-19 新建格式弹窗 + 新建排最前 + 富文本工具栏扩充
 
 用户提的四条：① 新建时弹框选 Markdown / 富文本；② 新建的笔记排在根目录最前；
@@ -32,7 +63,7 @@
 ### 验证
 
 - `node --check ui/app.js` 通过；`cargo test` 60 项（39 + 20 + 1）全过；`cargo build --release` 成功，
-  仓库根 `app.exe` 已用新产物覆盖（0.1.7，未升版本号——只是本地源码改动，没出安装包）。
+  仓库根 `app.exe` 已用新产物覆盖（当时仍是 0.1.7；随后升 0.1.8 重新打包，见上一节）。
 - harness（8791）：`qa-rich.py`、`rich-e2e.py` 34 项、`rich-e2e2.py` 19 项、`rich-layout.py` 20 项、
   `rich-link-geometry.py` 41 项、`p2_resp/p2_recent/p2_table/p2_media/p2_scrim` 全绿；
   新增 `_r7_roundtrip.py`（颜色/对齐/表格/分隔线/待办 落盘重开 15 项全过）、
