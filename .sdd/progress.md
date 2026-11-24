@@ -452,7 +452,7 @@ app.exe 已重启（PID 25180），等用户验收。
 
 - app.exe（debug）已多次重启验证，进程正常
 - `node --check app.js` 语法通过
-- 上次文件夹自动加载：config.json 已有 `本地笔记库路径`，list_notes 直接读取
+- 上次文件夹自动加载：config.json 已记录自定义笔记库路径，list_notes 直接读取
 
 ## 后续可做
 
