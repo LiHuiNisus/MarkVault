@@ -418,6 +418,11 @@ body[data-theme="dark"] .toast.is-warn { background: #2a2114; color: #ffd58a; bo
 #btn-new:hover { background: var(--accent-hover); }
 /* 新建旁边的下拉：视觉上是主按钮的附属箭头，不再是另一个"看不懂的图标按钮" */
 .sidebar-actions .dropdown { flex: 0 0 auto; display: flex; }
+/* 这个下拉必须向左展开。按钮本身贴在侧栏最右端，菜单按默认 left:0 往右长，
+   会超出 #sidebar 的 overflow:hidden 边界，被裁到只剩两三个字（"新建…"），
+   Ctrl N 之类的提示直接看不见。overflow:hidden 不能去掉：侧栏圆角、笔记列表
+   滚动都依赖它。right:0 后菜单整个落在侧栏内，宽度仍由内容撑开。 */
+#new-dropdown .dropdown-menu { left: auto; right: 0; }
 .sidebar-add {
   width: 32px; padding: 0;
   display: inline-flex; align-items: center; justify-content: center;

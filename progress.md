@@ -1,5 +1,31 @@
 # 当前进度
 
+## 2026-11-26 侧栏「新建」下拉被裁切修复
+
+用户反馈：光标移到「＋ 新建笔记」右侧箭头打开的下拉里，每行只剩「新建…」「导入…」几个字。
+根因是菜单按 `left:0` 往右展开，192px 宽的菜单有约 150px 越过 `#sidebar` 的 `overflow:hidden`
+边界被整块裁掉。`ui/style.css` 给 `#new-dropdown .dropdown-menu` 加 `left:auto; right:0`，
+菜单改为向左展开，完整落在 268px 侧栏内（`overflow:hidden` 保留，圆角与列表滚动依赖它）。
+
+- 1280/1180/1020/900 四档宽度、抽屉态、键盘操作（Enter/↓/Esc 回焦、点外部关闭）均验证无截断。
+- 顺手按常用操作回归：新建/改名/切换/自动保存、保存失败保护、搜索与筛选、文件夹与批量操作、
+  表格/任务/图片/链接、视图与主题、侧栏与抽屉、快捷键等，未发现新的可复现缺陷。
+
+### 打包 0.1.9 并重装
+
+- 版本号 0.1.8 → 0.1.9，只动三处：`src-tauri/Cargo.toml`、`tauri.conf.json`、`Cargo.lock` 里
+  `app` 那一节（同文件里 `jiff-tzdb` / `zerofrom` 也是 0.1.8，不能全局替换）。用 Python 按字节改，
+  无 BOM、CRLF 不变，diff 各一行。
+- `cargo tauri build` 2m00s，产出 `MarkVault_0.1.9_x64-setup.exe`
+  （2.51 MiB / 2,631,956 字节，FileVersion / ProductVersion 均 0.1.9）。
+- `setup.exe /S` 静默安装（退出码 0）覆盖 `〈安装目录〉`；注册表 `DisplayVersion` 已是 0.1.9，
+  `InstallLocation` 仍是 `"〈安装目录〉"`；装后 `app.exe` 11,912,192 字节、版本 0.1.9。
+- 装机后真机核对（CDP）：`__TAURI__.app.getVersion()` 返回 `0.1.9`；「新建」下拉
+  `[77,111,191,129]` 完整落在侧栏 `[10,278]` 内，四项文字均未截断，截图
+  `tmp-tests/newmenu-after-019.png`。
+- 工作区改动：`ui/style.css`、`progress.md`、`.sdd/progress.md`、`Cargo.toml`、`tauri.conf.json`、
+  `Cargo.lock`，未提交。
+
 ## 2026-11-20 打包 0.1.8 并重装
 
 功能改动（`79b4307`）只改了 `ui/` 与一处 Rust 排序，不改 `Cargo.toml` 的话装出来的还是
@@ -12,8 +38,8 @@
 - `cargo tauri build` 1m58s，产出 `MarkVault_0.1.8_x64-setup.exe`
   （2.51 MiB / 2,630,088 字节）。NSIS 会对 release 产物再补一次 bundle 类型信息，
   打包后重新把 `target/release/app.exe` 复制回仓库根 `app.exe`，两边 `FileVersion` 均为 0.1.8。
-- 静默安装覆盖 `D:\MarkVault`（`setup.exe /S`，退出码 0）；注册表 `DisplayVersion` 已是 0.1.8，
-  `InstallLocation` 仍是 `"D:\MarkVault"`。
+- 静默安装覆盖 `〈安装目录〉`（`setup.exe /S`，退出码 0）；注册表 `DisplayVersion` 已是 0.1.8，
+  `InstallLocation` 仍是 `"〈安装目录〉"`。
 
 ### 装机后核对（CDP 连装好的 0.1.8）
 
@@ -82,7 +108,7 @@
 - `cargo tauri build` 49s，产出 `MarkVault_0.1.7_x64-setup.exe`（2.50 MiB / 2,618,547 字节）。
 - 入库看是 0.1.5 → 0.1.7：上一次 0.1.6 的版本号改动当时没提交，一直留在工作区，
   所以这次一并升到 0.1.7（0.1.6 从未单独入库，只存在于装机的那份产物里）。
-- 静默安装 `setup.exe /S`，退出码 0；注册表 `DisplayVersion` 已是 0.1.7，`InstallLocation` 仍为 `D:\MarkVault`。
+- 静默安装 `setup.exe /S`，退出码 0；注册表 `DisplayVersion` 已是 0.1.7，`InstallLocation` 仍为 `〈安装目录〉`。
 - 仓库根 `app.exe` 用本轮 release 产物覆盖，`FileVersion` / `ProductVersion` 均为 0.1.7。
 
 ### 装机后核对（CDP 连真机）
@@ -135,7 +161,7 @@ P0/P1/P2 的 22 条整改提交为 `25fedb3` 后，出安装包并覆盖安装�
 - `cargo tauri build` 51s，产出 `MarkVault_0.1.6_x64-setup.exe`（2.50 MiB）。
   NSIS 会对 release 产物再打一次 bundle 类型信息，打包后重新把
   `target/release/app.exe` 复制回仓库根 `app.exe`。
-- 静默安装覆盖 `D:\MarkVault`（`setup.exe /S`，退出码 0），注册表 `DisplayVersion` 已是 0.1.6。
+- 静默安装覆盖 `〈安装目录〉`（`setup.exe /S`，退出码 0），注册表 `DisplayVersion` 已是 0.1.6。
 
 ### 装机后核对（CDP 连真机，只读）
 
@@ -375,7 +401,7 @@ Tauri 2 在 Windows 上默认把 WebView2 的拖放控制器接管为自己的 `
 - 打包前用 CDP 连真机：排序下拉含 `manual`、`state.order` 有值、`bindFolderDrag` /
   `syncGutterHeights` / `normalizeUrl` 均为 function、`get_order` 返回已存顺序。
 - 静默安装 `./MarkVault_0.1.4_x64-setup.exe /S` 退出码 0，
-  注册表 `DisplayVersion` 变为 `0.1.4`、`InstallLocation` 仍为 `D:\MarkVault`。
+  注册表 `DisplayVersion` 变为 `0.1.4`、`InstallLocation` 仍为 `〈安装目录〉`。
 - 安装后再启动复核：同一组功能检查全部通过、13 篇笔记列出、顺序文件的三个文件夹名读回来了。
 
 ### 坑（沿用之前的记录）
@@ -593,9 +619,9 @@ Quill 的 snow 主题只画图标、不给 `title`，悬停不出提示；标题
 
 ## 2026-10-24 安装 0.1.3
 
-用 `MarkVault_0.1.3_x64-setup.exe /S` 静默安装到 `D:\MarkVault`（覆盖 0.1.2 的安装产物）。
+用 `MarkVault_0.1.3_x64-setup.exe /S` 静默安装到 `〈安装目录〉`（覆盖 0.1.2 的安装产物）。
 
-- 注册表 `HKCU\...\Uninstall\MarkVault` 的 `DisplayVersion` 已是 `0.1.3`，`InstallLocation` 为 `D:\MarkVault`，
+- 注册表 `HKCU\...\Uninstall\MarkVault` 的 `DisplayVersion` 已是 `0.1.3`，`InstallLocation` 为 `〈安装目录〉`，
   `uninstall.exe` 已更新。
 - 安装后的 `app.exe` md5 是 `41da47ce`，与 `target/release/app.exe`（`73805488`）不同——
   NSIS 安装时会往 exe 里写入 bundle 类型信息，这是预期行为，不是装错版本
@@ -639,12 +665,12 @@ CDP 连真机：22 篇笔记、上次打开的富文本笔记自动载入、`kin
   `rich-e2e` / `rich-e2e2` / `rich-layout` / `rich-link-geometry` 均 0 失败；
   `rich-link-tooltip` 是可视化诊断脚本，输出几何数据与截图，本身不做断言。
 - 真机（`app.exe` + CDP 9333）实测：窗口正常、22 篇笔记列出、上次打开的富文本笔记自动载入、
-  类型开关为锁定态、笔记库指向 `D:\MarkVault\src-tauri\target\debug\notes`、
+  类型开关为锁定态、笔记库指向 `〈安装目录〉\src-tauri\target\debug\notes`、
   运行中的 `doSave` 源码已含新文案且旧文案不存在。
 
 ### 未完成
 
-- 安装包未实际执行安装（`D:\MarkVault` 里是旧版 0.1.2 的安装产物，直接覆盖安装会重写 exe）。
+- 安装包未实际执行安装（`〈安装目录〉` 里是旧版 0.1.2 的安装产物，直接覆盖安装会重写 exe）。
 
 ## 2026-10-24：模拟真人使用，四路并行 QA，修复 18 个缺陷
 

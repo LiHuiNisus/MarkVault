@@ -1,5 +1,64 @@
 # MarkVault — 开发进度
 
+## 2026-11-26：侧栏「新建」下拉菜单被裁切（用户报告，红框截图）
+
+### 现象
+
+点「＋ 新建笔记」右侧箭头打开下拉后，每行只剩开头两三个字（「新建…」「导入…」），
+`Ctrl N` 和「复制进笔记库」这类右侧说明整段不见。用户用红框标出。
+
+### 根因
+
+`#new-menu` 是 `position:absolute; left:0`，锚在 32px 宽的下拉按钮上；按钮又贴着侧栏右端
+（`--sidebar-width: 268px`）。菜单内容宽 192px（`min-width:168px` 被「导入本地文档… 复制进笔记库」
+这一行撑开），右边约 150px 越过 `#sidebar` 边界。`#sidebar` 为圆角和笔记列表滚动设了
+`overflow:hidden`，超出的部分被整块裁掉——**不是菜单宽度不够，是被祖先裁了**。
+
+### 修改（只改 `ui/style.css` 一处）
+
+```css
+#new-dropdown .dropdown-menu { left: auto; right: 0; }
+```
+
+菜单改成以按钮右边缘为基准向左展开，192px 完整落在 268px 侧栏内。
+`overflow:hidden` 保留（圆角与列表滚动都要它），也没有改成 `position:fixed`：
+工具栏那批 fixed 定位菜单需要 JS 每次算坐标，这里一行 CSS 就够，抽屉/窄窗口都不受影响。
+
+### 验证
+
+- harness 1280×800：菜单 rect 从 `[236,111,192,130]`（右侧被裁 150px）变成 `[76,111,192,130]`，
+  四个菜单项 `scrollWidth === clientWidth`，无截断；900×600 抽屉态 `[108,111,192,130]`
+  完整落在 300px 侧栏内；1180、1020 同样完整。
+- 键盘：Enter 打开→焦点落首项→↓ 到第二项→Esc 关闭并把焦点还给按钮；点外部关闭。
+- 真实安装版：`cargo build --release` 后覆盖 `〈安装目录〉\app.exe`，用 WebView2 CDP
+  （`WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9334`）连真实窗口，
+  菜单 `[77,111,191,129]` 完整落在 `[10,278]` 侧栏内，四个 item `inside=true`。
+- 截图留档：`tmp-tests/newmenu-before.png`、`newmenu-after.png`、`newmenu-after-real.png`。
+
+### 顺手回归（模拟常用操作，未发现新的可复现缺陷）
+
+- 新建（Markdown/富文本、默认格式记忆、Esc 取消不落盘）、标题改名、切换笔记不丢正文、自动保存 / Ctrl+S。
+- 保存失败注入（`__fail.save_note`）：状态栏报错、切笔记与新建都被中止且正文不丢、解除后重试成功；
+  删除当前笔记后继续输入会另存为新草稿。
+- 搜索与空结果、标签筛选/清除、文件夹新建与改名、右键菜单、批量选择/移动/删除。
+- 表格插入、预览里加行、任务勾选回写源码、图片插入、Ctrl+K 链接弹窗。
+- 视图三态、主题切换与持久化、F6 侧栏、抽屉遮罩收起、宽窄窗口往返。
+- 列表键盘导航（↑↓/Enter/F2/空格/Ctrl+A）、Ctrl+Tab 最近笔记、Ctrl+F 查找替换。
+- 1280/1180/1020/900 四档宽度下导出/更多/视图/标题/有序列表下拉均无裁切（它们走
+  `position:fixed` + JS 夹取，本来就不受祖先 overflow 影响）。
+
+### 打包 0.1.9 并重装
+
+- 版本号 0.1.8 → 0.1.9 只动三处：`Cargo.toml`、`tauri.conf.json`、`Cargo.lock` 的 `app` 节。
+  同文件里 `jiff-tzdb` / `zerofrom` 也是 0.1.8，不能全局替换。按字节改写，无 BOM、CRLF 不变。
+- `cargo tauri build` 2m00s，产出 `MarkVault_0.1.9_x64-setup.exe`（2,631,956 字节，
+  FileVersion / ProductVersion 均 0.1.9）。
+- `/S` 静默安装退出码 0；注册表 `DisplayVersion=0.1.9`、`InstallLocation="〈安装目录〉"`；
+  安装后 `app.exe` 11,912,192 字节、0.1.9。
+- 装机后 CDP 复核：`__TAURI__.app.getVersion()` = `0.1.9`；「新建」下拉 `[77,111,191,129]`
+  仍完整落在侧栏 `[10,278]` 内，四项文字无截断（`tmp-tests/newmenu-after-019.png`）。
+  应用已按原路径重新启动。
+
 ## 2026-10-22：查找跳转命中不可见 + 工具栏块级格式 5 处缺陷修复
 
 ### 1. 查找翻找时命中不出现在视口内（用户报告）
