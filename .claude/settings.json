@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"D:/MarkVault/.sdd/hooks/ctx-guard.cjs\"",
+            "command": "node \"${CLAUDE_PROJECT_DIR}/.sdd/hooks/ctx-guard.cjs\"",
             "timeout": 15,
             "statusMessage": "ctx-guard: 恢复交接快照"
           }
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"D:/MarkVault/.sdd/hooks/ctx-guard.cjs\"",
+            "command": "node \"${CLAUDE_PROJECT_DIR}/.sdd/hooks/ctx-guard.cjs\"",
             "timeout": 15
           }
         ]
@@ -28,7 +28,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"D:/MarkVault/.sdd/hooks/ctx-guard.cjs\"",
+            "command": "node \"${CLAUDE_PROJECT_DIR}/.sdd/hooks/ctx-guard.cjs\"",
             "timeout": 20,
             "statusMessage": "ctx-guard: 写入交接快照"
           }
